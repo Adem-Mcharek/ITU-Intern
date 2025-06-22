@@ -1,0 +1,438 @@
+{% extends "base.html" %}
+{% from '_components/status_badge.html' import status_badge %}
+
+{% block title %}{{ meeting.title }} - WebTV Processor{% endblock %}
+
+{% block content %}
+<!-- Header -->
+<div class="d-flex justify-content-between align-items-start mb-4">
+    <div class="flex-grow-1">
+        <nav aria-label="breadcrumb">
+            <ol class="breadcrumb">
+                <li class="breadcrumb-item"><a href="{{ url_for('main.index') }}">Home</a></li>
+                <li class="breadcrumb-item"><a href="{{ url_for('main.meetings') }}">Meetings</a></li>
+                <li class="breadcrumb-item active" aria-current="page">{{ meeting.title[:50] }}{% if meeting.title|length > 50 %}...{% endif %}</li>
+            </ol>
+        </nav>
+        <div class="d-flex align-items-center gap-3 mb-2">
+            <h1 class="h2 mb-0">{{ meeting.title }}</h1>
+            {{ status_badge(meeting, size='lg') }}
+        </div>
+        <p class="text-muted mb-0">
+            Created {{ meeting.created_at.strftime('%B %d, %Y at %I:%M %p') }}
+        </p>
+    </div>
+    <div class="ms-3">
+        <a href="{{ url_for('main.meetings') }}" class="btn btn-outline-secondary">
+            <svg class="bi me-1" width="16" height="16" fill="currentColor">
+                <path fill-rule="evenodd" d="M15 8a.5.5 0 0 0-.5-.5H2.707l3.147-3.146a.5.5 0 1 0-.708-.708l-4 4a.5.5 0 0 0 0 .708l4 4a.5.5 0 0 0 .708-.708L2.707 8.5H14.5A.5.5 0 0 0 15 8z"/>
+            </svg>
+            Back to Meetings
+        </a>
+    </div>
+</div>
+
+<!-- Status Updates (for processing meetings) -->
+{% if meeting.status in ['queued', 'processing'] %}
+<div class="alert alert-info" role="alert"
+     hx-get="{{ url_for('main.api_meeting_status', id=meeting.id) }}"
+     hx-trigger="every 5s"
+     hx-target="#status-update"
+     hx-indicator="#status-spinner">
+    <div id="status-update" class="d-flex align-items-center">
+        <div id="status-spinner" class="spinner-border spinner-border-sm me-2 htmx-indicator" role="status" aria-hidden="true"></div>
+        <span>
+            {% if meeting.status == 'queued' %}
+                Meeting is queued for processing...
+            {% elif meeting.status == 'processing' %}
+                Processing in progress... This may take several minutes depending on video length.
+            {% endif %}
+        </span>
+    </div>
+</div>
+{% endif %}
+
+<!-- Error Message -->
+{% if meeting.status == 'error' and meeting.error_message %}
+<div class="alert alert-danger" role="alert">
+    <h5 class="alert-heading">Processing Error</h5>
+    <p class="mb-0">{{ meeting.error_message }}</p>
+</div>
+{% endif %}
+
+<!-- Tabs -->
+<ul class="nav nav-tabs mb-4" id="meetingTabs" role="tablist">
+    <li class="nav-item" role="presentation">
+        <button class="nav-link active" id="overview-tab" data-bs-toggle="tab" data-bs-target="#overview" 
+                type="button" role="tab" aria-controls="overview" aria-selected="true">
+            <svg class="bi me-1" width="16" height="16" fill="currentColor">
+                <path d="M3 14s-1 0-1-1 1-4 6-4 6 3 6 4-1 1-1 1H3zm5-6a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/>
+            </svg>
+            Overview
+        </button>
+    </li>
+    {% if segments %}
+    <li class="nav-item" role="presentation">
+        <button class="nav-link" id="segments-tab" data-bs-toggle="tab" data-bs-target="#segments" 
+                type="button" role="tab" aria-controls="segments" aria-selected="false">
+            <svg class="bi me-1" width="16" height="16" fill="currentColor">
+                <path d="M7 14s-1 0-1-1 1-4 5-4 5 3 5 4-1 1-1 1H7zm4-6a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/>
+                <path fill-rule="evenodd" d="M5.216 14A2.238 2.238 0 0 1 5 13c0-1.355.68-2.75 1.936-3.72A6.325 6.325 0 0 0 5 9c-4 0-5 3-5 4s1 1 1 1h4.216z"/>
+                <path d="M4.5 8a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z"/>
+            </svg>
+            Segments ({{ segments|length }})
+        </button>
+    </li>
+    {% endif %}
+    {% if meeting.status == 'completed' %}
+    <li class="nav-item" role="presentation">
+        <button class="nav-link" id="files-tab" data-bs-toggle="tab" data-bs-target="#files" 
+                type="button" role="tab" aria-controls="files" aria-selected="false">
+            <svg class="bi me-1" width="16" height="16" fill="currentColor">
+                <path d="M9.293 0H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V4.707A1 1 0 0 0 13.707 4L10 .293A1 1 0 0 0 9.293 0zM9.5 3.5v-2l3 3h-2a1 1 0 0 1-1-1zM4.5 9a.5.5 0 0 1 0-1h7a.5.5 0 0 1 0 1h-7zM4 10.5a.5.5 0 0 1 .5-.5h7a.5.5 0 0 1 0 1h-7a.5.5 0 0 1-.5-.5zm.5 2.5a.5.5 0 0 1 0-1h4a.5.5 0 0 1 0 1h-4z"/>
+            </svg>
+            Files
+        </button>
+    </li>
+    {% endif %}
+</ul>
+
+<!-- Tab Content -->
+<div class="tab-content" id="meetingTabsContent">
+    <!-- Overview Tab -->
+    <div class="tab-pane fade show active" id="overview" role="tabpanel" aria-labelledby="overview-tab">
+        <div class="row g-4">
+            <div class="col-lg-8">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="mb-0">Meeting Information</h5>
+                    </div>
+                    <div class="card-body">
+                        <dl class="row">
+                            <dt class="col-sm-3">Source URL</dt>
+                            <dd class="col-sm-9">
+                                <a href="{{ meeting.source_url }}" target="_blank" rel="noopener noreferrer" 
+                                   class="text-break">
+                                    {{ meeting.source_url }}
+                                    <svg class="bi ms-1" width="12" height="12" fill="currentColor">
+                                        <path d="M8.636 3.5a.5.5 0 0 0-.5-.5H1.5A1.5 1.5 0 0 0 0 4.5v10A1.5 1.5 0 0 0 1.5 16h10a1.5 1.5 0 0 0 1.5-1.5V7.864a.5.5 0 0 0-1 0V14.5a.5.5 0 0 1-.5.5h-10a.5.5 0 0 1-.5-.5v-10a.5.5 0 0 1 .5-.5h6.636a.5.5 0 0 0 .5-.5z"/>
+                                        <path d="M16 .5a.5.5 0 0 0-.5-.5h-5a.5.5 0 0 0 0 1h3.793L6.146 9.146a.5.5 0 1 0 .708.708L15 1.707V5.5a.5.5 0 0 0 1 0v-5z"/>
+                                    </svg>
+                                </a>
+                            </dd>
+                            
+                            <dt class="col-sm-3">Segments</dt>
+                            <dd class="col-sm-9">{{ segments|length }} speaker segments identified</dd>
+                        </dl>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="col-lg-4">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="mb-0">Processing Status</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="mb-3">
+                            {{ status_badge(meeting, size='lg') }}
+                        </div>
+                        
+                        {% if meeting.status == 'completed' %}
+                        <div class="progress mb-3">
+                            <div class="progress-bar bg-success" role="progressbar" style="width: 100%" 
+                                 aria-valuenow="100" aria-valuemin="0" aria-valuemax="100">Complete</div>
+                        </div>
+                        <p class="text-success mb-0">
+                            <svg class="bi me-1" width="16" height="16" fill="currentColor">
+                                <path d="M10.97 4.97a.235.235 0 0 0-.02.022L7.477 9.417 5.384 7.323a.75.75 0 0 0-1.06 1.06L6.97 11.03a.75.75 0 0 0 1.079-.02l3.992-4.99a.75.75 0 0 0-1.071-1.05z"/>
+                            </svg>
+                            Processing completed successfully
+                        </p>
+                        {% elif meeting.status == 'processing' %}
+                        <div class="progress mb-3">
+                            <div class="progress-bar progress-bar-striped progress-bar-animated bg-warning" 
+                                 role="progressbar" style="width: 60%" aria-valuenow="60" aria-valuemin="0" aria-valuemax="100">
+                                In Progress
+                            </div>
+                        </div>
+                        <p class="text-warning mb-0">Processing audio and generating transcript...</p>
+                        {% elif meeting.status == 'queued' %}
+                        <div class="progress mb-3">
+                            <div class="progress-bar" role="progressbar" style="width: 10%" 
+                                 aria-valuenow="10" aria-valuemin="0" aria-valuemax="100">Queued</div>
+                        </div>
+                        <p class="text-muted mb-0">Waiting to start processing...</p>
+                        {% elif meeting.status == 'error' %}
+                        <div class="progress mb-3">
+                            <div class="progress-bar bg-danger" role="progressbar" style="width: 100%" 
+                                 aria-valuenow="100" aria-valuemin="0" aria-valuemax="100">Error</div>
+                        </div>
+                        <p class="text-danger mb-0">
+                            <svg class="bi me-1" width="16" height="16" fill="currentColor">
+                                <path d="M5.354 4.646a.5.5 0 1 0-.708.708L7.293 8l-2.647 2.646a.5.5 0 0 0 .708.708L8 8.707l2.646 2.647a.5.5 0 0 0 .708-.708L8.707 8l2.647-2.646a.5.5 0 0 0-.708-.708L8 7.293 5.354 4.646z"/>
+                            </svg>
+                            Processing failed
+                        </p>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Segments Tab -->
+    {% if segments %}
+    <div class="tab-pane fade" id="segments" role="tabpanel" aria-labelledby="segments-tab">
+        <div class="row mb-3">
+            <div class="col-md-6">
+                <input type="text" class="form-control" id="segmentSearch" 
+                       placeholder="Search segments by speaker or content...">
+            </div>
+            <div class="col-md-6">
+                <select class="form-select" id="speakerFilter">
+                    <option value="">All speakers</option>
+                    {% for speaker in segments|map(attribute='speaker')|unique|sort %}
+                        {% if speaker %}
+                        <option value="{{ speaker }}">{{ speaker }}</option>
+                        {% endif %}
+                    {% endfor %}
+                </select>
+            </div>
+        </div>
+        
+        <div class="accordion" id="segmentsAccordion">
+            {% for segment in segments %}
+            <div class="accordion-item segment-item" 
+                 data-speaker="{{ segment.speaker or '' }}" 
+                 data-content="{{ segment.content or '' }}">
+                <h2 class="accordion-header">
+                    <button class="accordion-button collapsed" type="button" 
+                            data-bs-toggle="collapse" data-bs-target="#segment{{ segment.id }}" 
+                            aria-expanded="false" aria-controls="segment{{ segment.id }}">
+                        <div class="d-flex justify-content-between align-items-center w-100 me-3">
+                            <div>
+                                <strong>{{ segment.speaker or 'Unknown Speaker' }}</strong>
+                                {% if segment.representing %}
+                                    <small class="text-muted ms-2">({{ segment.representing }})</small>
+                                {% endif %}
+                            </div>
+                            {% if segment.start_time is not none and segment.end_time is not none %}
+                            <div class="text-end">
+                                <small class="text-muted">
+                                    {{ "%.1f" | format(segment.start_time) }}s - {{ "%.1f" | format(segment.end_time) }}s
+                                </small>
+                            </div>
+                            {% endif %}
+                        </div>
+                    </button>
+                </h2>
+                <div id="segment{{ segment.id }}" class="accordion-collapse collapse" 
+                     data-bs-parent="#segmentsAccordion">
+                    <div class="accordion-body">
+                        <div class="mb-3">
+                            {{ segment.content or 'No content available.' }}
+                        </div>
+                        {% if segment.start_time is not none and segment.end_time is not none %}
+                        <div class="d-flex justify-content-between align-items-center">
+                            <small class="text-muted">
+                                Duration: {{ "%.1f" | format(segment.end_time - segment.start_time) }} seconds
+                            </small>
+                            <button class="btn btn-sm btn-outline-primary" 
+                                    onclick="openTimestampLink('{{ meeting.source_url }}', {{ segment.start_time|int }})">
+                                <svg class="bi me-1" width="14" height="14" fill="currentColor">
+                                    <path d="M8.636 3.5a.5.5 0 0 0-.5-.5H1.5A1.5 1.5 0 0 0 0 4.5v10A1.5 1.5 0 0 0 1.5 16h10a1.5 1.5 0 0 0 1.5-1.5V7.864a.5.5 0 0 0-1 0V14.5a.5.5 0 0 1-.5.5h-10a.5.5 0 0 1-.5-.5v-10a.5.5 0 0 1 .5-.5h6.636a.5.5 0 0 0 .5-.5z"/>
+                                    <path d="M16 .5a.5.5 0 0 0-.5-.5h-5a.5.5 0 0 0 0 1h3.793L6.146 9.146a.5.5 0 1 0 .708.708L15 1.707V5.5a.5.5 0 0 0 1 0v-5z"/>
+                                </svg>
+                                Open Timestamp Link
+                            </button>
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
+    
+    <!-- Files Tab -->
+    {% if meeting.status == 'completed' %}
+    <div class="tab-pane fade" id="files" role="tabpanel" aria-labelledby="files-tab">
+        <div class="row g-4">
+            {% if meeting.audio_path %}
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-body text-center">
+                        <div class="text-primary mb-3">
+                            <svg width="48" height="48" fill="currentColor">
+                                <path d="M8 3.5a.5.5 0 0 0-1 0V9a.5.5 0 0 0 .252.434l3.5 2a.5.5 0 0 0 .496-.868L8 8.71V3.5z"/>
+                                <path d="M8 16A8 8 0 1 0 8 0a8 8 0 0 0 0 16zm7-8A7 7 0 1 1 1 8a7 7 0 0 1 14 0z"/>
+                            </svg>
+                        </div>
+                        <h5>Audio File</h5>
+                        <p class="text-muted">Original audio extracted from WebTV</p>
+                        <a href="{{ url_for('main.download_file', id=meeting.id, file_type='audio') }}" 
+                           class="btn btn-primary">
+                            <svg class="bi me-1" width="16" height="16" fill="currentColor">
+                                <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
+                                <path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z"/>
+                            </svg>
+                            Download MP3
+                        </a>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+            
+            {% if meeting.transcript_path %}
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-body text-center">
+                        <div class="text-success mb-3">
+                            <svg width="48" height="48" fill="currentColor">
+                                <path d="M5.5 7a.5.5 0 0 0 0 1h5a.5.5 0 0 0 0-1h-5zM5 9.5a.5.5 0 0 1 .5-.5h5a.5.5 0 0 1 0 1h-5a.5.5 0 0 1-.5-.5zm0 2a.5.5 0 0 1 .5-.5h2a.5.5 0 0 1 0 1h-2a.5.5 0 0 1-.5-.5z"/>
+                                <path d="M9.5 0H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V4.5L9.5 0zm0 1v2A1.5 1.5 0 0 0 11 4.5h2V14a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V2a1 1 0 0 1 1-1h5.5z"/>
+                            </svg>
+                        </div>
+                        <h5>Raw Transcript</h5>
+                        <p class="text-muted">Plain text transcript from Whisper AI</p>
+                        <a href="{{ url_for('main.download_file', id=meeting.id, file_type='transcript') }}" 
+                           class="btn btn-success">
+                            <svg class="bi me-1" width="16" height="16" fill="currentColor">
+                                <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
+                                <path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z"/>
+                            </svg>
+                            Download TXT
+                        </a>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+            
+            {% if meeting.srt_path %}
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-body text-center">
+                        <div class="text-warning mb-3">
+                            <svg width="48" height="48" fill="currentColor">
+                                <path d="M4.5 11.5A.5.5 0 0 1 5 11h10a.5.5 0 0 1 0 1H5a.5.5 0 0 1-.5-.5zm-2-4A.5.5 0 0 1 3 7h10a.5.5 0 0 1 0 1H3a.5.5 0 0 1-.5-.5zm-2-4A.5.5 0 0 1 1 3h10a.5.5 0 0 1 0 1H1a.5.5 0 0 1-.5-.5z"/>
+                            </svg>
+                        </div>
+                        <h5>Subtitles</h5>
+                        <p class="text-muted">SRT file with timestamps for video players</p>
+                        <a href="{{ url_for('main.download_file', id=meeting.id, file_type='srt') }}" 
+                           class="btn btn-warning">
+                            <svg class="bi me-1" width="16" height="16" fill="currentColor">
+                                <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
+                                <path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z"/>
+                            </svg>
+                            Download SRT
+                        </a>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+            
+            {% if meeting.speakers_path %}
+            <div class="col-md-6">
+                <div class="card">
+                    <div class="card-body text-center">
+                        <div class="text-info mb-3">
+                            <svg width="48" height="48" fill="currentColor">
+                                <path d="M7 14s-1 0-1-1 1-4 5-4 5 3 5 4-1 1-1 1H7zm4-6a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/>
+                                <path fill-rule="evenodd" d="M5.216 14A2.238 2.238 0 0 1 5 13c0-1.355.68-2.75 1.936-3.72A6.325 6.325 0 0 0 5 9c-4 0-5 3-5 4s1 1 1 1h4.216z"/>
+                                <path d="M4.5 8a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z"/>
+                            </svg>
+                        </div>
+                        <h5>Speaker Transcript</h5>
+                        <p class="text-muted">Transcript with speaker identification</p>
+                        <a href="{{ url_for('main.download_file', id=meeting.id, file_type='speakers') }}" 
+                           class="btn btn-info">
+                            <svg class="bi me-1" width="16" height="16" fill="currentColor">
+                                <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
+                                <path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708l3 3z"/>
+                            </svg>
+                            Download TXT
+                        </a>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Segment search and filter
+document.addEventListener('DOMContentLoaded', function() {
+    const searchInput = document.getElementById('segmentSearch');
+    const speakerFilter = document.getElementById('speakerFilter');
+    const segments = document.querySelectorAll('.segment-item');
+    
+    function filterSegments() {
+        const searchTerm = searchInput ? searchInput.value.toLowerCase() : '';
+        const selectedSpeaker = speakerFilter ? speakerFilter.value : '';
+        
+        segments.forEach(segment => {
+            const speaker = segment.dataset.speaker.toLowerCase();
+            const content = segment.dataset.content.toLowerCase();
+            
+            const matchesSearch = !searchTerm || 
+                speaker.includes(searchTerm) || 
+                content.includes(searchTerm);
+            const matchesSpeaker = !selectedSpeaker || 
+                segment.dataset.speaker === selectedSpeaker;
+            
+            if (matchesSearch && matchesSpeaker) {
+                segment.style.display = '';
+            } else {
+                segment.style.display = 'none';
+            }
+        });
+    }
+    
+    if (searchInput) {
+        searchInput.addEventListener('input', filterSegments);
+    }
+    if (speakerFilter) {
+        speakerFilter.addEventListener('change', filterSegments);
+    }
+    
+    // Initialize tooltips
+    const tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
+    tooltipTriggerList.map(function(tooltipTriggerEl) {
+        return new bootstrap.Tooltip(tooltipTriggerEl);
+    });
+});
+
+// Generate and open UN WebTV timestamp link in new tab
+function openTimestampLink(sourceUrl, startTimeSeconds) {
+    try {
+        // Parse the UN WebTV URL to extract the slug
+        // Example: https://webtv.un.org/en/asset/k1g/k1goifl37w
+        const urlMatch = sourceUrl.match(/\/asset\/([^\/]+)\/([A-Za-z0-9]+)$/);
+        
+        if (urlMatch) {
+            const [, category, slug] = urlMatch;
+            // Generate the proper UN WebTV timestamp URL format
+            // Example: https://webtv.un.org/en/asset/k1g/k1goifl37w?t=519&kalturaStartTime=159
+            const timestampUrl = `${sourceUrl}?t=${startTimeSeconds}&kalturaStartTime=${startTimeSeconds}`;
+            window.open(timestampUrl, '_blank');
+        } else {
+            // Fallback for non-UN WebTV URLs
+            const timestampUrl = `${sourceUrl}?t=${startTimeSeconds}`;
+            window.open(timestampUrl, '_blank');
+        }
+    } catch (error) {
+        console.error('Error generating timestamp link:', error);
+        // Fallback to simple format
+        const timestampUrl = `${sourceUrl}?t=${startTimeSeconds}`;
+        window.open(timestampUrl, '_blank');
+    }
+}
+</script>
+{% endblock %} 

@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+
+{% block title %}Page Not Found - WebTV Processor{% endblock %}
+
+{% block content %}
+<div class="text-center py-5">
+    <div class="mb-4">
+        <svg width="120" height="120" fill="currentColor" class="text-muted">
+            <path d="M6 .278a.768.768 0 0 1 .08.858 7.208 7.208 0 0 0-.878 3.46c0 4.021 3.278 7.277 7.318 7.277.527 0 1.04-.055 1.533-.16a.787.787 0 0 1 .81.316.733.733 0 0 1-.031.893A8.349 8.349 0 0 1 8.344 16C3.734 16 0 12.286 0 7.71 0 4.266 2.114 1.312 5.124.06A.752.752 0 0 1 6 .278z"/>
+        </svg>
+    </div>
+    
+    <h1 class="display-1 fw-bold text-primary">404</h1>
+    <h2 class="h4 mb-3">Page Not Found</h2>
+    <p class="lead mb-4">
+        Sorry, the page you're looking for doesn't exist or has been moved.
+    </p>
+    
+    <div class="d-flex justify-content-center gap-3">
+        <a href="{{ url_for('main.index') }}" class="btn btn-primary">
+            <svg class="bi me-1" width="16" height="16" fill="currentColor">
+                <path d="m8 2.748-.717-.737C5.6.281 2.514.878 1.4 3.053c-.523 1.023-.641 2.5.314 4.385.92 1.815 2.834 3.989 6.286 6.357 3.452-2.368 5.365-4.542 6.286-6.357.955-1.886.838-3.362.314-4.385C13.486.878 10.4.28 8.717 2.01L8 2.748zM8 15C-7.333 4.868 3.279-3.04 7.824 1.143c.06.055.119.112.176.171a3.12 3.12 0 0 1 .176-.17C12.72-3.042 23.333 4.867 8 15z"/>
+            </svg>
+            Go Home
+        </a>
+        <a href="{{ url_for('main.meetings') }}" class="btn btn-outline-secondary">
+            <svg class="bi me-1" width="16" height="16" fill="currentColor">
+                <path d="M6 2a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H6zm0 1h4a1 1 0 0 1 1 1v8a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/>
+                <path d="M6.5 7a.5.5 0 0 1 .5-.5h2a.5.5 0 0 1 0 1H7a.5.5 0 0 1-.5-.5zM7 8.5a.5.5 0 0 0 0 1h1.5a.5.5 0 0 0 0-1H7zM7 10a.5.5 0 0 0 0 1h1.5a.5.5 0 0 0 0-1H7z"/>
+            </svg>
+            Browse Meetings
+        </a>
+    </div>
+    
+    <div class="mt-5">
+        <p class="text-muted">
+            If you believe this is an error, please 
+            <a href="{{ url_for('main.about') }}" class="text-decoration-none">contact support</a>.
+        </p>
+    </div>
+</div>
+{% endblock %} 
