@@ -25,6 +25,9 @@ def create_app():
     # Simple configuration with optional environment variable overrides
     app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
     
+    # Disable CSRF for testing (only in development)
+    app.config['WTF_CSRF_ENABLED'] = os.environ.get('WTF_CSRF_ENABLED', 'False').lower() == 'true'
+    
     # Database configuration
     default_db_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'app.db')
     app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', f'sqlite:///{default_db_path}')

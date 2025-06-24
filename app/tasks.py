@@ -55,10 +55,15 @@ def start_processing(meeting):
                 db.session.commit()
                 
             except Exception as e:
+                import traceback
+                error_details = traceback.format_exc()
+                print(f"Pipeline error for meeting {meeting.id}: {str(e)}")
+                print(f"Full traceback: {error_details}")
+                
                 # Update status to error
                 meeting_obj = Meeting.query.get(meeting.id)
                 meeting_obj.status = 'error'
-                meeting_obj.error_message = str(e)
+                meeting_obj.error_message = f"{str(e)}\n\nFull traceback:\n{error_details}"
                 db.session.commit()
     
     # Start background thread

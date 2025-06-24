@@ -93,6 +93,12 @@ The app works perfectly without any configuration!
 └── uploads/                 # Generated files (created automatically)
 ```
 
+## Processing Pipeline
+
+The application follows a modular processing pipeline as shown below:
+
+![Processing Pipeline](image.png)
+
 ## Dependencies
 
 - **Flask**: Web framework

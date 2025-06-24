@@ -32,7 +32,7 @@ class SearchForm(FlaskForm):
             ('', 'All Statuses'),
             ('queued', 'Queued'),
             ('processing', 'Processing'),
-            ('done', 'Completed'),
+            ('completed', 'Completed'),
             ('error', 'Error')
         ],
         validators=[Optional()]

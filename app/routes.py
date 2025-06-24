@@ -37,7 +37,10 @@ def index():
             return redirect(url_for('main.meeting_detail', id=meeting.id))
             
         except Exception as e:
-            flash('Failed to start processing. Please try again.', 'error')
+            import traceback
+            current_app.logger.error(f"Processing error: {str(e)}")
+            current_app.logger.error(traceback.format_exc())
+            flash(f'Failed to start processing: {str(e)}', 'error')
     
     # Show recent meetings
     recent_meetings = Meeting.query.order_by(Meeting.created_at.desc()).limit(5).all()

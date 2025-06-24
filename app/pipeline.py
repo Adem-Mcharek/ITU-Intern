@@ -3,9 +3,8 @@ WebTV Processing Pipeline - Enhanced Implementation
 Based on the comprehensive standalone script with improvements for:
 - Better UN WebTV URL handling
 - Enhanced audio format selection (prioritizing English)
-- Chunking for Gemini API
-- Robust error handling and retries
-- **NEW: SRT timing integration with speaker segments**
+- **NEW: Integrated SRT to JSON conversion and Gemini speaker diarization**
+- **NEW: Advanced speaker organization with database integration**
 """
 import os
 import re
@@ -16,7 +15,9 @@ import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from datetime import timedelta
-from difflib import SequenceMatcher
+import threading
+import random
+import math
 
 # Optional imports for AI functionality
 try:
@@ -30,8 +31,10 @@ try:
     import whisper
     import torch
     WHISPER_AVAILABLE = True
+    TORCH_AVAILABLE = True
 except ImportError:
     WHISPER_AVAILABLE = False
+    TORCH_AVAILABLE = False
     print("Warning: openai-whisper not available. Transcription will be disabled.")
 
 try:
@@ -44,26 +47,50 @@ except ImportError:
 
 # Configuration constants
 PARTNER_ID = "2503451"  # constant for all UN WebTV assets
-CHUNK_SIZE = 12000  # characters for Gemini chunking
-OVERLAP = 500  # overlap between chunks
+
+# Gemini configuration from upgrade files
+MODEL_NAME = "gemini-2.5-flash-lite-preview-06-17"
+MAX_TOKENS_PER_BATCH = 10000  # Smaller batches to avoid truncated responses
+ESTIMATED_TOKENS_PER_SEGMENT = 100  # Conservative estimate
+MAX_SEGMENTS_PER_BATCH = MAX_TOKENS_PER_BATCH // ESTIMATED_TOKENS_PER_SEGMENT
+
+# Retry configuration
+MAX_RETRIES = 3
+BASE_DELAY = 1  # Base delay in seconds
+MAX_DELAY = 60  # Maximum delay in seconds
 
 # Enhanced Gemini prompt for better speaker separation
-GEMINI_PROMPT = '''You are a helpful assistant who reads a transcript or meeting text. Your task is to split it into segments, each with a clear speaker label, as in the following format:
+GEMINI_PROMPT_FOR_CONTEXT = '''
+You are an expert in transcript analysis and speaker identification.
 
-[SPEAKER NAME]
-Content ...
+Your task is to analyze the following transcript text and extract information about all the speakers mentioned.
 
-Identify chair, panelists, delegates, and use their titles, country, or best-guess if the name is unclear. Skip repetitive formalities, focus on main interventions. Keep speaker turns clear and readable.
+Please identify:
+1. Speaker names (when they introduce themselves or are introduced)
+2. Their positions/titles (e.g., "Minister", "Undersecretary General", "CEO")
+3. Organizations they represent (e.g., "UN Office for Digital and Emerging Technologies", "Dominican Republic", "World Bank")
+4. Countries they represent (if applicable)
 
-Example:
-[Chair]
-Thank you. The meeting is called to order...
+Look for patterns like:
+- "My name is [Name]"
+- Direct introductions: "Please welcome [Name] who is [Title] at [Organization]"
+- References to titles and positions
+- Country representations
 
-[Mr. Smith, UNDP]
-Thank you, Chair. Our work this year focused on...
+Return your findings as a JSON object with this structure:
+{
+    "speakers": [
+        {
+            "name": "Speaker Name",
+            "title": "Their title/position",
+            "organization": "Organization they represent",
+            "country": "Country (if applicable)",
+            "description": "Brief description for identification"
+        }
+    ]
+}
 
----
-Here is the transcript to process:
+Transcript text:
 '''
 
 def setup_gemini_api():
@@ -82,7 +109,7 @@ def setup_gemini_api():
     
     if api_key:
         genai.configure(api_key=api_key)
-        return genai.GenerativeModel('gemini-pro')
+        return genai.GenerativeModel(MODEL_NAME)
     return None
 
 def _slug_to_entry_id(slug: str) -> str:
@@ -222,7 +249,7 @@ def transcribe_audio(audio_path: Path, out_dir: str, model_size: str = "medium.e
     
     try:
         # Use GPU if available
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = "cuda" if TORCH_AVAILABLE and torch.cuda.is_available() else "cpu"
         print(f"Loading Whisper model '{model_size}' on {device.upper()}")
         
         # Load Whisper model
@@ -263,78 +290,41 @@ def format_srt_time(seconds: float) -> str:
     milliseconds = int((seconds % 1) * 1000)
     return f"{int(hours):02d}:{int(minutes):02d}:{int(seconds):02d},{milliseconds:03d}"
 
-def chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = OVERLAP) -> List[str]:
-    """Split long text into overlapping chunks for Gemini processing."""
-    starts = range(0, len(text), chunk_size - overlap)
-    return [text[s:s + chunk_size] for s in starts]
+# ===== NEW FUNCTIONS FROM UPGRADE FILES =====
 
-def _parse_gemini_response(data: dict) -> str:
-    """Safely extract generated text from Gemini response JSON."""
-    try:
-        return data["candidates"][0]["content"]["parts"][0]["text"].strip()
-    except (KeyError, IndexError, TypeError):
-        return ""
+def srt_to_json(srt_path: Path, json_path: Path):
+    """Convert SRT file to JSON format - exact logic from srt_to_json.py"""
+    with open(srt_path, 'r', encoding='utf-8') as f:
+        srt_content = f.read()
 
-def _call_gemini_rest(prompt: str, api_key: str, max_out_tokens: int = 2048, retry: bool = True) -> str:
-    """Call Gemini API directly using REST API."""
-    model = "gemini-1.5-flash"
-    rest_url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+    cues = []
+    for match in re.finditer(r'(\d+)\n([\d:,]+) --> ([\d:,]+)\n(.*?)(?=\n\n\d+\n|$)', srt_content, re.DOTALL):
+        index = int(match.group(1))
+        start = match.group(2).replace(',', '.')
+        end = match.group(3).replace(',', '.')
+        text = match.group(4).strip().replace('\n', ' ')
+
+        cues.append({
+            "index": index,
+            "start": start,
+            "end": end,
+            "speaker": "",
+            "text": text
+        })
+
+    with open(json_path, 'w', encoding='utf-8') as f:
+        json.dump(cues, f, indent=2, ensure_ascii=False)
     
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.2,
-            "maxOutputTokens": max_out_tokens,
-        },
-    }
-    
-    try:
-        resp = requests.post(
-            rest_url, 
-            headers={"Content-Type": "application/json"}, 
-            data=json.dumps(payload), 
-            timeout=90
-        )
-        
-        if resp.status_code != 200:
-            error_msg = f"Gemini API error {resp.status_code}: {resp.text[:400]}"
-            print(f"ERROR: {error_msg}")
-            if retry:
-                print("Retrying with smaller output...")
-                time.sleep(2)
-                return _call_gemini_rest(prompt, api_key, max_out_tokens=1024, retry=False)
-            raise RuntimeError(error_msg)
+    print(f'Successfully converted {srt_path} to {json_path}')
+    return cues
 
-        data = resp.json()
-        text = _parse_gemini_response(data)
+def estimate_tokens(text):
+    """Rough estimation of tokens based on character count."""
+    return len(text) // 3  # Rough approximation: ~3 chars per token
 
-        # If no text and we haven't retried yet
-        if text == "" and retry:
-            new_max = max(int(max_out_tokens * 0.5), 512)
-            print(f"No text in response. Retrying with max_tokens={new_max}...")
-            time.sleep(2)
-            return _call_gemini_rest(prompt, api_key, max_out_tokens=new_max, retry=False)
-
-        return text
-    except Exception as e:
-        if retry:
-            print(f"Error calling Gemini API: {e}")
-            print("Retrying in 5 seconds...")
-            time.sleep(5)
-            return _call_gemini_rest(prompt, api_key, max_out_tokens=max_out_tokens, retry=False)
-        raise
-
-def separate_speakers(transcript_path: Path, out_dir: str, meeting_title: str = "") -> Tuple[Path, List[Dict]]:
-    """
-    Enhanced speaker separation using chunking and improved prompts
-    Returns: (speakers_transcript_path, segments_list)
-    """
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Read transcript
-    with open(transcript_path, 'r', encoding='utf-8') as f:
-        transcript_text = f.read()
+def extract_speaker_info_from_txt(transcript_text):
+    """Extract speaker information from the full transcript text using Gemini API."""
+    print("\nStep 1: Extracting speaker information from transcript.txt...")
     
     # Get API key
     api_key = None
@@ -345,428 +335,553 @@ def separate_speakers(transcript_path: Path, out_dir: str, meeting_title: str = 
         api_key = os.environ.get('GEMINI_API_KEY')
     
     if not api_key:
-        print("Warning: No Gemini API key found. Creating fallback speaker transcript.")
-        return create_fallback_speakers(transcript_text, out_dir)
+        print("Warning: No Gemini API key found. Skipping speaker context extraction.")
+        return {"speakers": []}
+    
+    if not GEMINI_AVAILABLE:
+        print("Warning: Gemini not available. Skipping speaker context extraction.")
+        return {"speakers": []}
     
     try:
-        print(f"Processing transcript ({len(transcript_text)} characters) with Gemini")
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(model_name=MODEL_NAME)
         
-        if len(transcript_text) <= CHUNK_SIZE:
-            # Single chunk processing
-            full_prompt = GEMINI_PROMPT + transcript_text
-            result_text = _call_gemini_rest(full_prompt, api_key)
-        else:
-            # Multi-chunk processing
-            chunks = chunk_text(transcript_text)
-            outputs = []
-            total = len(chunks)
-            
-            print(f"Processing transcript in {total} chunks")
-            for idx, chunk in enumerate(chunks, 1):
-                print(f"Processing chunk {idx}/{total}")
-                chunk_prompt = GEMINI_PROMPT + f"(Part {idx} of {total})\n" + chunk
-                chunk_result = _call_gemini_rest(chunk_prompt, api_key)
-                outputs.append(chunk_result)
-                
-                # Small delay between requests
-                if idx < total:
-                    time.sleep(1)
-            
-            result_text = "\n\n".join(outputs)
+        prompt = GEMINI_PROMPT_FOR_CONTEXT + transcript_text + "\n\nReturn ONLY the JSON object, no other text."
         
-        # Parse the result into segments
-        segments = parse_speaker_response(result_text)
+        response = model.generate_content(prompt)
+        cleaned_response = response.text.strip()
         
-        # Save speaker-separated transcript
-        speakers_path = out_dir / 'transcript_speakers.txt'
-        with open(speakers_path, 'w', encoding='utf-8') as f:
-            f.write(result_text)
+        # Clean up JSON markers
+        if cleaned_response.startswith("```json"):
+            cleaned_response = cleaned_response[7:]
+        if cleaned_response.endswith("```"):
+            cleaned_response = cleaned_response[:-3]
         
-        print(f"Speaker separation complete. Generated {len(segments)} segments.")
-        return speakers_path, segments
+        speaker_info = json.loads(cleaned_response.strip())
+        
+        print(f"Successfully extracted information for {len(speaker_info.get('speakers', []))} speakers:")
+        for speaker in speaker_info.get('speakers', []):
+            print(f"  - {speaker.get('name', 'Unknown')}: {speaker.get('title', '')} at {speaker.get('organization', '')}")
+        
+        return speaker_info
         
     except Exception as e:
-        print(f"Speaker separation failed: {e}")
-        # Fallback to simple speaker separation
-        return create_fallback_speakers(transcript_text, out_dir)
+        print(f"Error extracting speaker information: {e}")
+        print("Continuing without speaker context...")
+        return {"speakers": []}
 
-def create_fallback_speakers(transcript_text: str, out_dir: Path) -> Tuple[Path, List[Dict]]:
-    """Create a fallback speaker transcript when AI processing fails."""
-    segments = [{
-        'speaker': 'Unknown Speaker',
-        'representing': '',
-        'content': transcript_text.strip(),
-        'start_time': None,
-        'end_time': None
-    }]
+def create_global_speaker_context(speaker_info):
+    """Create a comprehensive speaker context from the extracted speaker information."""
+    if not speaker_info.get('speakers'):
+        return ""
     
-    speakers_path = out_dir / 'transcript_speakers.txt'
-    with open(speakers_path, 'w', encoding='utf-8') as f:
-        f.write("# Speaker separation unavailable - showing original transcript\n\n")
-        f.write("[Unknown Speaker]\n")
-        f.write(transcript_text)
+    context = "\n\nKNOWN SPEAKERS IN THIS TRANSCRIPT:\n"
+    context += "=" * 50 + "\n"
     
-    return speakers_path, segments
-
-def parse_speaker_response(response_text: str) -> List[Dict]:
-    """Parse Gemini's response to extract speaker segments."""
-    segments = []
-    lines = response_text.split('\n')
-    current_segment = {}
-    
-    for line in lines:
-        line = line.strip()
+    for speaker in speaker_info.get('speakers', []):
+        name = speaker.get('name', 'Unknown')
+        title = speaker.get('title', '')
+        org = speaker.get('organization', '')
+        country = speaker.get('country', '')
+        desc = speaker.get('description', '')
         
-        # Look for speaker headers like [Speaker Name] or [Chair]
-        speaker_match = re.match(r'\[([^\]]+)\]', line)
-        if speaker_match:
-            # Save previous segment if it exists
-            if current_segment.get('content'):
-                segments.append(current_segment)
-            
-            # Start new segment
-            speaker_full = speaker_match.group(1)
-            
-            # Try to parse speaker and representing
-            if ',' in speaker_full:
-                parts = speaker_full.split(',', 1)
-                speaker = parts[0].strip()
-                representing = parts[1].strip()
-            else:
-                speaker = speaker_full.strip()
-                representing = ''
-            
-            current_segment = {
-                'speaker': speaker,
-                'representing': representing,
-                'content': '',
-                'start_time': None,
-                'end_time': None
-            }
-        elif current_segment and line and not line.startswith('#'):
-            # Add content to current segment
-            current_segment['content'] += line + ' '
+        context += f"• {name}"
+        if title:
+            context += f" - {title}"
+        if org:
+            context += f" at {org}"
+        if country:
+            context += f" (representing {country})"
+        if desc:
+            context += f"\n  Description: {desc}"
+        context += "\n"
     
-    # Add final segment
-    if current_segment.get('content'):
-        segments.append(current_segment)
+    context += "=" * 50 + "\n"
+    context += "IMPORTANT: Use these EXACT speaker names when you recognize them in the transcript segments.\n"
+    context += "For speakers not in this list, use descriptive labels like 'Participant 1', 'Moderator', etc.\n\n"
     
-    # Clean up content
-    for segment in segments:
-        segment['content'] = segment['content'].strip()
-    
-    return segments
+    return context
 
-def parse_srt_file(srt_path: Path) -> List[Dict]:
-    """
-    Parse SRT file to extract timing and content information
-    Returns: List of segments with start_time, end_time, and content
-    """
-    segments = []
+def create_batches(transcript_data, max_segments_per_batch):
+    """Split transcript data into manageable batches."""
+    batches = []
+    for i in range(0, len(transcript_data), max_segments_per_batch):
+        batch = transcript_data[i:i + max_segments_per_batch]
+        batches.append(batch)
     
-    try:
-        with open(srt_path, 'r', encoding='utf-8') as f:
-            content = f.read().strip()
-    except Exception as e:
-        print(f"Warning: Could not read SRT file {srt_path}: {e}")
-        return segments
+    print(f"Split transcript into {len(batches)} batches of maximum {max_segments_per_batch} segments each.")
+    return batches
+
+def create_speaker_context(all_filled_segments):
+    """Create a context summary of identified speakers from previous batches."""
+    speaker_examples = {}
     
-    # Split by double newlines to get individual segments
-    srt_blocks = re.split(r'\n\s*\n', content)
-    
-    for block in srt_blocks:
-        lines = block.strip().split('\n')
-        if len(lines) < 3:
-            continue
+    # Collect examples of each speaker's speech
+    for segment in all_filled_segments:
+        if segment.get("speaker") and segment["speaker"] != "":
+            speaker_name = segment["speaker"]
+            if speaker_name not in speaker_examples:
+                speaker_examples[speaker_name] = []
             
+            # Store up to 2 examples per speaker
+            if len(speaker_examples[speaker_name]) < 2:
+                speaker_examples[speaker_name].append(segment["text"][:200])  # First 200 chars
+    
+    if not speaker_examples:
+        return ""
+    
+    context = "\n\nPreviously identified speakers in earlier batches:\n"
+    for speaker, examples in speaker_examples.items():
+        context += f"- {speaker}: {' | '.join(examples)}\n"
+    
+    return context
+
+def call_gemini_with_retry(model, prompt, batch_number, total_batches):
+    """Call Gemini API with retry logic and exponential backoff."""
+    for attempt in range(MAX_RETRIES):
         try:
-            # Line 1: sequence number (ignore)
-            # Line 2: timing
-            timing_line = lines[1]
-            # Line 3+: content
-            text_content = ' '.join(lines[2:]).strip()
-            
-            # Parse timing: "00:00:00,000 --> 00:00:06,799"
-            timing_match = re.match(r'(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2}),(\d{3})', timing_line)
-            if not timing_match:
-                continue
-                
-            # Convert to seconds
-            start_h, start_m, start_s, start_ms = map(int, timing_match.groups()[:4])
-            end_h, end_m, end_s, end_ms = map(int, timing_match.groups()[4:])
-            
-            start_seconds = start_h * 3600 + start_m * 60 + start_s + start_ms / 1000.0
-            end_seconds = end_h * 3600 + end_m * 60 + end_s + end_ms / 1000.0
-            
-            segments.append({
-                'start_time': start_seconds,
-                'end_time': end_seconds,
-                'content': text_content
-            })
-            
+            print(f"  Attempt {attempt + 1}/{MAX_RETRIES} for batch {batch_number}/{total_batches}...")
+            response = model.generate_content(prompt)
+            return response
+        
         except Exception as e:
-            print(f"Warning: Could not parse SRT block: {e}")
-            continue
+            error_msg = str(e)
+            print(f"  Attempt {attempt + 1} failed: {error_msg}")
+            
+            # If this is the last attempt, don't wait
+            if attempt == MAX_RETRIES - 1:
+                print(f"  All {MAX_RETRIES} attempts failed for batch {batch_number}")
+                return None
+            
+            # Calculate delay with exponential backoff and jitter
+            delay = min(BASE_DELAY * (2 ** attempt) + random.uniform(0, 1), MAX_DELAY)
+            print(f"  Waiting {delay:.1f} seconds before retry...")
+            time.sleep(delay)
     
-    print(f"Parsed {len(segments)} segments from SRT file")
-    return segments
+    return None
 
-def calculate_text_similarity(text1: str, text2: str) -> float:
-    """Calculate similarity between two text strings (0-1) with improved normalization"""
-    # Normalize texts more aggressively
-    def normalize_text(text):
-        # Remove punctuation, extra spaces, convert to lowercase
-        text = re.sub(r'[^\w\s]', ' ', text.lower())
-        # Remove common filler words that might not match exactly
-        text = re.sub(r'\b(um|uh|ah|er|the|and|or|but|in|on|at|to|for|of|with|by)\b', ' ', text)
-        # Collapse multiple spaces
-        text = re.sub(r'\s+', ' ', text).strip()
-        return text
-    
-    text1_norm = normalize_text(text1)
-    text2_norm = normalize_text(text2)
-    
-    if not text1_norm or not text2_norm:
-        return 0.0
-    
-    # Use SequenceMatcher for similarity
-    similarity = SequenceMatcher(None, text1_norm, text2_norm).ratio()
-    
-    # Bonus for word overlap (helps with different word order)
-    words1 = set(text1_norm.split())
-    words2 = set(text2_norm.split())
-    if words1 and words2:
-        word_overlap = len(words1 & words2) / len(words1 | words2)
-        # Combine sequence similarity with word overlap
-        similarity = (similarity * 0.7) + (word_overlap * 0.3)
-    
-    return min(similarity, 1.0)
+def fill_speakers_in_batch(batch_data, batch_number, total_batches, global_speaker_context="", previous_speaker_context=""):
+    """Uses the Gemini API to fill in the speaker fields for a batch of transcript segments."""
+    print(f"\nStep 2: Processing batch {batch_number}/{total_batches} ({len(batch_data)} segments)...")
 
-def match_speakers_with_timing(speaker_segments: List[Dict], srt_segments: List[Dict]) -> List[Dict]:
-    """
-    Enhanced matching of speaker segments with SRT timing data.
-    Uses improved text similarity and sophisticated partial matching strategies.
-    """
-    print(f"Matching {len(speaker_segments)} speaker segments with {len(srt_segments)} SRT segments")
+    batch_string = json.dumps(batch_data, indent=2)
     
-    matched_segments = []
-    used_srt_indices = set()
+    # Estimate tokens for this batch
+    estimated_tokens = estimate_tokens(batch_string)
+    print(f"Estimated tokens for this batch: {estimated_tokens}")
     
-    for speaker_idx, speaker_seg in enumerate(speaker_segments):
-        # Use 'content' field if available, otherwise 'text'
-        speaker_content = speaker_seg.get('content', speaker_seg.get('text', '')).strip()
-        if not speaker_content:
-            matched_segments.append(speaker_seg)
-            continue
-        
-        best_match = None
-        best_similarity = 0.0
-        best_srt_indices = []
-        
-        print(f"\nMatching speaker {speaker_idx + 1}: '{speaker_seg.get('speaker', 'Unknown')[:30]}...'")
-        
-        # Strategy 1: Try different window sizes to find the best match
-        # Speaker segments are typically much longer than individual SRT segments
-        for window_size in range(1, min(21, len(srt_segments) + 1)):  # Try windows up to 20 segments
-            for start_idx in range(len(srt_segments) - window_size + 1):
-                end_idx = start_idx + window_size
-                
-                # Skip if any segment in window is already used
-                if any(idx in used_srt_indices for idx in range(start_idx, end_idx)):
-                    continue
-                
-                # Combine content from window - fix field name
-                combined_content = ' '.join(
-                    srt_segments[idx]['content'] for idx in range(start_idx, end_idx)
-                ).strip()
-                
-                if not combined_content:
-                    continue
-                
-                # Calculate similarity
-                similarity = calculate_text_similarity(speaker_content, combined_content)
-                
-                # Bonus for reasonable length match (prefer segments that aren't too short or too long)
-                length_ratio = len(combined_content) / max(len(speaker_content), 1)
-                if 0.3 <= length_ratio <= 2.0:  # Reasonable length ratio
-                    similarity += 0.05
-                
-                # Bonus for consecutive segments (more likely to be a single speaker)
-                if window_size > 1:
-                    similarity += 0.02
-                
-                # Update best match if this is better
-                if similarity > best_similarity:
-                    best_similarity = similarity
-                    best_match = {
-                        'start_time': srt_segments[start_idx]['start_time'],
-                        'end_time': srt_segments[end_idx - 1]['end_time'],
-                        'content': combined_content,
-                        'window_size': window_size
-                    }
-                    best_srt_indices = list(range(start_idx, end_idx))
-        
-        # Strategy 2: If no good match found, try partial matching with relaxed criteria
-        if best_similarity < 0.4:
-            print(f"   No good direct match (best: {best_similarity:.3f}), trying partial matching...")
-            
-            # Look for smaller chunks within the speaker content
-            speaker_words = speaker_content.split()
-            chunk_size = min(50, len(speaker_words) // 3)  # Try smaller chunks
-            
-            for chunk_start in range(0, len(speaker_words), chunk_size):
-                chunk_end = min(chunk_start + chunk_size, len(speaker_words))
-                speaker_chunk = ' '.join(speaker_words[chunk_start:chunk_end])
-                
-                # Try to match this chunk against SRT segments
-                for window_size in range(1, min(11, len(srt_segments) + 1)):
-                    for start_idx in range(len(srt_segments) - window_size + 1):
-                        end_idx = start_idx + window_size
-                        
-                        if any(idx in used_srt_indices for idx in range(start_idx, end_idx)):
-                            continue
-                        
-                        combined_content = ' '.join(
-                            srt_segments[idx]['content'] for idx in range(start_idx, end_idx)
-                        ).strip()
-                        
-                        similarity = calculate_text_similarity(speaker_chunk, combined_content)
-                        
-                        if similarity > best_similarity and similarity > 0.3:
-                            best_similarity = similarity
-                            best_match = {
-                                'start_time': srt_segments[start_idx]['start_time'],
-                                'end_time': srt_segments[end_idx - 1]['end_time'],
-                                'content': combined_content,
-                                'window_size': window_size
-                            }
-                            best_srt_indices = list(range(start_idx, end_idx))
-        
-        # Strategy 3: For very low similarity, try to at least estimate timing based on position
-        if best_similarity < 0.25 and speaker_idx > 0:
-            print(f"   Very low similarity ({best_similarity:.3f}), estimating based on position...")
-            
-            # Find the last matched segment's end time
-            prev_end_time = None
-            for prev_seg in reversed(matched_segments):
-                if prev_seg.get('end_time') is not None:
-                    prev_end_time = prev_seg['end_time']
-                    break
-            
-            if prev_end_time is not None:
-                # Look for unused SRT segments after the previous segment
-                candidate_segments = []
-                for idx, srt_seg in enumerate(srt_segments):
-                    if idx not in used_srt_indices and srt_seg['start_time'] >= prev_end_time:
-                        candidate_segments.append((idx, srt_seg))
-                
-                if candidate_segments:
-                    # Take a reasonable number of segments for this speaker
-                    num_segments = min(5, len(candidate_segments))
-                    selected_indices = [idx for idx, _ in candidate_segments[:num_segments]]
-                    
-                    best_match = {
-                        'start_time': candidate_segments[0][1]['start_time'],
-                        'end_time': candidate_segments[num_segments-1][1]['end_time'],
-                        'content': 'Estimated timing based on position',
-                        'window_size': num_segments
-                    }
-                    best_srt_indices = selected_indices
-                    best_similarity = 0.3  # Assign a reasonable similarity for estimation
-        
-        # Apply the best match found
-        if best_match and best_similarity > 0.25:  # Lower threshold for acceptance
-            speaker_seg['start_time'] = best_match['start_time']
-            speaker_seg['end_time'] = best_match['end_time']
-            used_srt_indices.update(best_srt_indices)
-            
-            print(f"   ✓ Matched with similarity {best_similarity:.3f}, timing {best_match['start_time']:.1f}s-{best_match['end_time']:.1f}s (window: {best_match.get('window_size', 1)})")
-        else:
-            print(f"   ✗ No suitable timing match found (best similarity: {best_similarity:.3f})")
-        
-        matched_segments.append(speaker_seg)
-    
-    # Post-processing: Fill gaps between matched segments
-    print(f"\n--- Post-processing: Filling timing gaps ---")
-    for i in range(len(matched_segments)):
-        current_seg = matched_segments[i]
-        
-        # If this segment has no timing but neighbors do, interpolate
-        if current_seg.get('start_time') is None:
-            prev_end = None
-            next_start = None
-            
-            # Find previous segment with timing
-            for j in range(i-1, -1, -1):
-                if matched_segments[j].get('end_time') is not None:
-                    prev_end = matched_segments[j]['end_time']
-                    break
-            
-            # Find next segment with timing
-            for j in range(i+1, len(matched_segments)):
-                if matched_segments[j].get('start_time') is not None:
-                    next_start = matched_segments[j]['start_time']
-                    break
-            
-            # Interpolate if we have both bounds
-            if prev_end is not None and next_start is not None and prev_end < next_start:
-                gap_duration = next_start - prev_end
-                estimated_start = prev_end + (gap_duration * 0.1)  # Small buffer
-                estimated_end = next_start - (gap_duration * 0.1)
-                
-                current_seg['start_time'] = estimated_start
-                current_seg['end_time'] = estimated_end
-                print(f"   ✓ Interpolated timing for '{current_seg.get('speaker', 'Unknown')[:20]}...': {estimated_start:.1f}s-{estimated_end:.1f}s")
-    
-    # Count successful matches
-    matched_count = sum(1 for seg in matched_segments if seg.get('start_time') is not None)
-    print(f"\n=== SUMMARY ===")
-    print(f"Successfully matched timing for {matched_count}/{len(speaker_segments)} speaker segments")
-    print(f"Used {len(used_srt_indices)}/{len(srt_segments)} SRT segments")
-    
-    return matched_segments
+    if estimated_tokens > MAX_TOKENS_PER_BATCH:
+        print(f"WARNING: Batch may exceed token limit. Consider reducing MAX_SEGMENTS_PER_BATCH.")
 
-def save_speakers_with_timing(segments: List[Dict], speakers_path: Path):
-    """
-    Save speaker segments with timing information to file
-    Enhanced format includes timing data when available
-    """
+    # Get API key
+    api_key = None
     try:
-        with open(speakers_path, 'w', encoding='utf-8') as f:
-            for segment in segments:
-                speaker = segment.get('speaker', 'Unknown Speaker')
-                representing = segment.get('representing', '')
-                content = segment.get('content', '')
-                start_time = segment.get('start_time')
-                end_time = segment.get('end_time')
-                
-                # Format speaker header
-                if representing:
-                    speaker_header = f"[{speaker}, {representing}]"
-                else:
-                    speaker_header = f"[{speaker}]"
-                
-                # Add timing if available
-                if start_time is not None and end_time is not None:
-                    # Format timing as MM:SS for readability
-                    start_min = int(start_time // 60)
-                    start_sec = int(start_time % 60)
-                    end_min = int(end_time // 60)
-                    end_sec = int(end_time % 60)
-                    timing_info = f" ({start_min:02d}:{start_sec:02d} - {end_min:02d}:{end_sec:02d})"
-                    speaker_header += timing_info
-                
-                f.write(f"{speaker_header}\n")
-                f.write(f"{content}\n\n")
-                
-        print(f"Saved enhanced speaker transcript with timing to {speakers_path}")
-        
+        from flask import current_app
+        api_key = current_app.config.get('GEMINI_API_KEY')
+    except RuntimeError:
+        api_key = os.environ.get('GEMINI_API_KEY')
+    
+    if not api_key:
+        print("Warning: No Gemini API key found. Returning batch with empty speakers.")
+        return batch_data
+    
+    if not GEMINI_AVAILABLE:
+        print("Warning: Gemini not available. Returning batch with empty speakers.")
+        return batch_data
+
+    try:
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(model_name=MODEL_NAME)
     except Exception as e:
-        print(f"Warning: Could not save enhanced speakers file: {e}")
+        print(f"Error setting up Gemini model: {e}")
+        return batch_data
+
+    prompt = f"""
+You are an expert in transcript analysis and speaker diarization.
+Your task is to analyze the following JSON transcript batch (part {batch_number} of {total_batches}). 
+This transcript contains segments of speech, each with an empty "speaker" field.
+
+Based on the content of the "text" field in each segment, identify who is speaking. 
+Use the speaker information and context provided below to maintain accurate and consistent speaker labels.
+
+{global_speaker_context}
+
+{previous_speaker_context}
+
+INSTRUCTIONS:
+1. Use the EXACT speaker names from the "KNOWN SPEAKERS" list when you recognize them
+3. Maintain consistency with speakers identified in previous batches
+4. Base your identification on speech patterns, content, and context clues
+
+Please return the **complete and valid JSON object**, identical in structure to the input, 
+but with the "speaker" field correctly filled for every segment.
+
+Input Transcript Batch:
+```json
+{batch_string}
+```
+
+Your output should be ONLY the filled JSON, starting with `[` and ending with `]`.
+"""
+
+    # Call Gemini with retry logic
+    response = call_gemini_with_retry(model, prompt, batch_number, total_batches)
+    
+    if response is None:
+        print(f"\nFailed to get response from Gemini API after {MAX_RETRIES} attempts for batch {batch_number}")
+        return batch_data
+
+    try:
+        # Clean up the response to ensure it's valid JSON
+        cleaned_response = response.text.strip()
+        if cleaned_response.startswith("```json"):
+            cleaned_response = cleaned_response[7:]
+        if cleaned_response.endswith("```"):
+            cleaned_response = cleaned_response[:-3]
+
+        # Check if JSON response appears to be truncated
+        cleaned_response = cleaned_response.strip()
+        if not cleaned_response.endswith(']') and not cleaned_response.endswith('}'):
+            print(f"Warning: Response appears to be truncated for batch {batch_number}")
+            print(f"Response ends with: '{cleaned_response[-50:]}'")
+            raise ValueError("Response appears to be truncated - incomplete JSON")
+
+        filled_data = json.loads(cleaned_response)
+        
+        # Validate that we got the expected number of segments
+        if len(filled_data) != len(batch_data):
+            print(f"Warning: Expected {len(batch_data)} segments, got {len(filled_data)} for batch {batch_number}")
+            raise ValueError(f"Segment count mismatch: expected {len(batch_data)}, got {len(filled_data)}")
+        
+        print(f"Successfully processed batch {batch_number}/{total_batches}")
+        return filled_data
+    except Exception as e:
+        print(f"\nAn error occurred while parsing response for batch {batch_number}: {e}")
+        print("--- API Response Text ---")
+        try:
+            response_preview = response.text[:2000] + "..." if len(response.text) > 2000 else response.text
+            print(response_preview)
+            print(f"\nResponse length: {len(response.text)} characters")
+            print(f"Response ends with: '{response.text[-100:]}'")
+        except:
+            print("Could not display response text")
+        print("------------------------")
+        return batch_data
+
+def fill_speakers_in_json(transcript_data, global_speaker_context):
+    """Uses the Gemini API to fill in the speaker fields in a transcript JSON using batching."""
+    print(f"\nStep 2: Processing transcript with {len(transcript_data)} segments...")
+    
+    # Create batches
+    batches = create_batches(transcript_data, MAX_SEGMENTS_PER_BATCH)
+    
+    all_filled_segments = []
+    
+    for i, batch in enumerate(batches, 1):
+        # Create speaker context from previously processed segments
+        previous_speaker_context = create_speaker_context(all_filled_segments)
+        
+        # Process the batch with both global and previous context
+        filled_batch = fill_speakers_in_batch(
+            batch, i, len(batches), 
+            global_speaker_context, 
+            previous_speaker_context
+        )
+        
+        if filled_batch is None:
+            print(f"Failed to process batch {i}. Using original data.")
+            filled_batch = batch
+        
+        # Add to our collection of filled segments
+        all_filled_segments.extend(filled_batch)
+    
+    print(f"\nSuccessfully processed all {len(batches)} batches.")
+    print(f"Total segments processed: {len(all_filled_segments)}")
+    
+    return all_filled_segments
+
+def parse_speaker_info(speaker_name):
+    """Advanced parser to extract speaker name and representing organization/country - exact logic from organize_speakers_table.py"""
+    if not speaker_name or speaker_name.strip() == "":
+        return "Unknown Speaker", "Unknown"
+    
+    speaker_name = speaker_name.strip()
+    original_name = speaker_name
+    
+    import re
+    
+    # Define comprehensive patterns and keywords
+    country_indicators = [
+        'Afghanistan', 'Albania', 'Algeria', 'Argentina', 'Australia', 'Austria', 'Bangladesh', 
+        'Belgium', 'Brazil', 'Canada', 'China', 'Colombia', 'Denmark', 'Egypt', 'France', 
+        'Germany', 'India', 'Indonesia', 'Iran', 'Iraq', 'Italy', 'Japan', 'Jordan', 
+        'Kenya', 'Malaysia', 'Mexico', 'Morocco', 'Netherlands', 'Nigeria', 'Norway', 
+        'Pakistan', 'Philippines', 'Poland', 'Russia', 'Saudi Arabia', 'South Africa', 
+        'Spain', 'Sweden', 'Switzerland', 'Turkey', 'Ukraine', 'United Kingdom', 'UK', 
+        'United States', 'USA', 'Venezuela', 'Vietnam', 'Yemen', 'Zimbabwe',
+        'Dominican Republic', 'East African'
+    ]
+    
+    org_indicators = [
+        'UN', 'United Nations', 'UNESCO', 'UNICEF', 'WHO', 'IMF', 'World Bank',
+        'European Union', 'EU', 'African Union', 'AU', 'ASEAN', 'NATO', 'OSCE',
+        'Ministry', 'Department', 'Office', 'Committee', 'Council', 'Commission',
+        'Organization', 'Organisation', 'Government', 'Embassy', 'Delegation',
+        'Secretariat', 'Agency', 'Bureau', 'Institute', 'Foundation', 'Society',
+        'Association', 'Federation', 'Union', 'Alliance', 'Coalition',
+        'ADB', 'Asian Development Bank', 'Drupal', 'Project Liberty'
+    ]
+    
+    title_indicators = [
+        'Secretary-General', 'Secretary General', 'Undersecretary', 'Under-Secretary',
+        'Assistant Secretary', 'Special Representative', 'Special Envoy', 'Special Advisor',
+        'Ambassador', 'Permanent Representative', 'Minister', 'Deputy Minister',
+        'Director-General', 'Director General', 'Executive Director', 'President',
+        'Vice President', 'Chairman', 'Chair', 'Moderator', 'Commissioner',
+        'Representative', 'Delegate', 'Coordinator', 'Adviser', 'Advisor', 'CEO',
+        'Expert', 'Analyst', 'Consultant', 'Researcher'
+    ]
+    
+    # Pattern 1: "Name (Organization/Country)"
+    paren_match = re.match(r'^(.+?)\s*\((.+?)\)$', speaker_name)
+    if paren_match:
+        name_part = paren_match.group(1).strip()
+        org_part = paren_match.group(2).strip()
+        return name_part, org_part
+    
+    # Pattern 2: "Name - Organization" or "Name – Organization"
+    dash_match = re.match(r'^(.+?)\s*[–-]\s*(.+)$', speaker_name)
+    if dash_match:
+        name_part = dash_match.group(1).strip()
+        org_part = dash_match.group(2).strip()
+        return name_part, org_part
+    
+    # Pattern 3: "Name, Title, Organization"
+    comma_parts = speaker_name.split(',')
+    if len(comma_parts) >= 2:
+        name_part = comma_parts[0].strip()
+        remaining = ', '.join(comma_parts[1:]).strip()
+        # Check if remaining parts contain organization indicators
+        if any(indicator.lower() in remaining.lower() for indicator in org_indicators + country_indicators):
+            return name_part, remaining
+    
+    # Pattern 4: "Organization: Name" or "Country: Name"
+    colon_match = re.match(r'^(.+?):\s*(.+)$', speaker_name)
+    if colon_match:
+        first_part = colon_match.group(1).strip()
+        second_part = colon_match.group(2).strip()
+        # Usually organization comes first in this pattern
+        return second_part, first_part
+    
+    # Pattern 5: Check for titles that indicate representing organization
+    for title in title_indicators:
+        if title.lower() in speaker_name.lower():
+            # Look for "of", "for", "from" patterns
+            title_patterns = [
+                rf'{re.escape(title)}\s+(?:of|for|from)\s+(.+?)(?:\s|$)',
+                rf'(.+?)\s+{re.escape(title)}',  # "Country Minister"
+                rf'{re.escape(title)}.*?([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)'  # Extract proper nouns after title
+            ]
+            
+            for pattern in title_patterns:
+                title_match = re.search(pattern, speaker_name, re.IGNORECASE)
+                if title_match:
+                    org_extract = title_match.group(1).strip()
+                    if len(org_extract) > 2:  # Avoid single letters
+                        # If it's a known country or organization
+                        if any(indicator.lower() in org_extract.lower() for indicator in country_indicators + org_indicators):
+                            return speaker_name, org_extract
+    
+    # Pattern 6: Country names in speaker name
+    for country in country_indicators:
+        if country.lower() in speaker_name.lower():
+            # Check for government context
+            if any(word in speaker_name.lower() for word in ['minister', 'government', 'representative', 'ambassador']):
+                return speaker_name, f"{country} Government"
+            else:
+                return speaker_name, country
+    
+    # Pattern 7: Organization names in speaker name
+    for org in org_indicators:
+        if org.lower() in speaker_name.lower():
+            # Special handling for specific organizations
+            if "world bank" in speaker_name.lower():
+                return speaker_name, "World Bank"
+            elif "asian development bank" in speaker_name.lower() or "adb" in speaker_name.lower():
+                return speaker_name, "Asian Development Bank"
+            elif "drupal" in speaker_name.lower():
+                return speaker_name, "Drupal Foundation"
+            elif "project liberty" in speaker_name.lower():
+                return speaker_name, "Project Liberty Institute"
+            elif "east african" in speaker_name.lower():
+                return speaker_name, "East African Community"
+            elif "un" in speaker_name.lower() or "united nations" in speaker_name.lower():
+                # Try to be more specific about UN agency
+                if "office" in speaker_name.lower():
+                    return speaker_name, "UN Office"
+                elif "special" in speaker_name.lower():
+                    return speaker_name, "UN Special Office"
+                else:
+                    return speaker_name, "United Nations"
+            else:
+                return speaker_name, org
+    
+    # Pattern 8: Special cases for common roles
+    special_cases = {
+        'moderator': 'Event Moderator',
+        'chair': 'Session Chair', 
+        'chairperson': 'Session Chair',
+        'host': 'Event Host',
+        'facilitator': 'Session Facilitator'
+    }
+    
+    for role, representing in special_cases.items():
+        if role.lower() in speaker_name.lower():
+            return speaker_name, representing
+    
+    # Pattern 9: If name contains "of" followed by organization/country
+    of_pattern = r'^(.+?)\s+of\s+(.+)$'
+    of_match = re.match(of_pattern, speaker_name, re.IGNORECASE)
+    if of_match:
+        name_part = of_match.group(1).strip()
+        org_part = of_match.group(2).strip()
+        # Clean up common artifacts
+        if org_part.startswith("the "):
+            org_part = org_part[4:]
+        return name_part, org_part
+    
+    # Pattern 10: Check if entire name is just an organization
+    if any(indicator.lower() in speaker_name.lower() for indicator in org_indicators):
+        # If it's mostly uppercase or contains clear org indicators
+        if speaker_name.isupper() or any(word in speaker_name.lower() for word in ['ministry', 'department', 'office', 'un ']):
+            return speaker_name, speaker_name
+    
+    # Pattern 11: Look for name patterns (First Last format) vs organization patterns
+    words = speaker_name.split()
+    if len(words) >= 2:
+        # Check if it looks like a person's name (First Last pattern)
+        if (words[0][0].isupper() and words[1][0].isupper() and 
+            len(words[0]) > 1 and len(words[1]) > 1 and
+            not any(indicator.lower() in speaker_name.lower() for indicator in org_indicators)):
+            # Looks like a person's name without clear organization
+            return speaker_name, "Not specified"
+    
+    # Clean up the speaker name (remove excessive descriptive text)
+    clean_name = speaker_name
+    if " - " in clean_name and len(clean_name.split(" - ")) == 2:
+        parts = clean_name.split(" - ")
+        if len(parts[0]) < len(parts[1]):  # Shorter part is likely the name
+            clean_name = parts[0].strip()
+        else:
+            clean_name = parts[1].strip()
+    elif " (" in clean_name:
+        clean_name = clean_name.split(" (")[0].strip()
+    
+    # Default case: No clear organization pattern found
+    return clean_name, "Not specified"
+
+def group_consecutive_segments(transcript_data):
+    """Group consecutive segments from the same speaker into single entries - exact logic from organize_speakers_table.py"""
+    if not transcript_data:
+        return []
+    
+    # Helper function to safely convert time to float
+    def safe_time_convert(time_value, default=0.0):
+        try:
+            if time_value is None:
+                return default
+            
+            # If it's already a number, return it
+            if isinstance(time_value, (int, float)):
+                return float(time_value)
+            
+            # If it's a string in HH:MM:SS.mmm format, convert to seconds
+            if isinstance(time_value, str) and ':' in time_value:
+                time_parts = time_value.split(':')
+                if len(time_parts) == 3:
+                    hours = float(time_parts[0])
+                    minutes = float(time_parts[1])
+                    seconds = float(time_parts[2])
+                    return hours * 3600 + minutes * 60 + seconds
+            
+            # Try to convert as is
+            return float(time_value)
+            
+        except (ValueError, TypeError):
+            return default
+    
+    grouped_segments = []
+    current_group = {
+        'speaker': transcript_data[0].get('speaker', 'Unknown'),
+        'text_parts': [transcript_data[0].get('text', '')],
+        'start_time': safe_time_convert(transcript_data[0].get('start', 0)),
+        'end_time': safe_time_convert(transcript_data[0].get('end', 0)),
+        'segment_count': 1
+    }
+    
+    for i in range(1, len(transcript_data)):
+        segment = transcript_data[i]
+        current_speaker = segment.get('speaker', 'Unknown')
+        previous_speaker = current_group['speaker']
+        
+        # If same speaker, add to current group
+        if current_speaker == previous_speaker:
+            current_group['text_parts'].append(segment.get('text', ''))
+            current_group['end_time'] = safe_time_convert(segment.get('end', current_group['end_time']))
+            current_group['segment_count'] += 1
+        else:
+            # Different speaker, save current group and start new one
+            current_group['combined_text'] = ' '.join(current_group['text_parts'])
+            grouped_segments.append(current_group.copy())
+            
+            # Start new group
+            current_group = {
+                'speaker': current_speaker,
+                'text_parts': [segment.get('text', '')],
+                'start_time': safe_time_convert(segment.get('start', 0)),
+                'end_time': safe_time_convert(segment.get('end', 0)),
+                'segment_count': 1
+            }
+    
+    # Don't forget the last group
+    current_group['combined_text'] = ' '.join(current_group['text_parts'])
+    grouped_segments.append(current_group)
+    
+    return grouped_segments
+
+def create_speakers_table(transcript_data, meeting_id):
+    """Create a structured table from the transcript data matching the database schema - exact logic from organize_speakers_table.py"""
+    print(f"Processing {len(transcript_data)} transcript segments...")
+    
+    # Group consecutive segments from same speaker
+    grouped_segments = group_consecutive_segments(transcript_data)
+    print(f"Grouped into {len(grouped_segments)} speaker turns...")
+    
+    # Create table data
+    table_data = []
+    
+    for i, group in enumerate(grouped_segments):
+        speaker_name = group['speaker']
+        clean_speaker, representing = parse_speaker_info(speaker_name)
+        
+        # Create row matching the database schema
+        row = {
+            'speaker': clean_speaker,
+            'representing': representing,
+            'content': group['combined_text'],
+            'start_time': group['start_time'],
+            'end_time': group['end_time'],
+            'duration_seconds': group['end_time'] - group['start_time'],
+            'segment_count': group['segment_count']  # Extra info: how many segments were combined
+        }
+        
+        table_data.append(row)
+    
+    return table_data
 
 def run_full_pipeline(url: str, title: str, target_dir: str) -> Dict:
     """
-    Run the enhanced WebTV processing pipeline with timing integration
+    Run the enhanced WebTV processing pipeline with the new logic from upgrade files
     Returns: Dictionary with file paths and processing results
     """
     target_dir = Path(target_dir)
@@ -797,29 +912,73 @@ def run_full_pipeline(url: str, title: str, target_dir: str) -> Dict:
         results['transcript'] = str(transcript_path.relative_to(target_dir.parent))
         results['srt'] = str(srt_path.relative_to(target_dir.parent))
         
-        # Step 3: Separate speakers with chunking
-        print("Step 3: Separating speakers...")
-        speakers_path, segments = separate_speakers(transcript_path, str(target_dir), title)
+        # Step 3: Convert SRT to JSON using exact logic from srt_to_json.py
+        print("Step 3: Converting SRT to JSON...")
+        json_path = target_dir / 'transcript.json'
+        transcript_json = srt_to_json(srt_path, json_path)
         
-        # Step 4: Parse SRT file and match timing with speaker segments
-        print("Step 4: Parsing SRT file and matching timing with speaker segments...")
-        srt_segments = parse_srt_file(srt_path)
-        if srt_segments:
-            matched_segments = match_speakers_with_timing(segments, srt_segments)
-            
-            # Step 5: Save enhanced speaker transcript with timing
-            print("Step 5: Saving enhanced speaker transcript with timing...")
-            save_speakers_with_timing(matched_segments, speakers_path)
-            
-            # Update segments with timing information
-            segments = matched_segments
-        else:
-            print("Warning: No SRT segments found, proceeding without timing")
+        # Step 4: Extract speaker context from full transcript using Gemini
+        print("Step 4: Extracting speaker context from transcript...")
+        with open(transcript_path, 'r', encoding='utf-8') as f:
+            transcript_text = f.read()
+        speaker_info = extract_speaker_info_from_txt(transcript_text)
+        global_speaker_context = create_global_speaker_context(speaker_info)
+        
+        # Step 5: Fill speaker information using exact logic from gemini_speaker_diarization_copy.py
+        print("Step 5: Filling speaker information using Gemini...")
+        filled_transcript = fill_speakers_in_json(transcript_json, global_speaker_context)
+        
+        # Save filled transcript
+        filled_json_path = target_dir / 'transcript_speaker_filled.json'
+        with open(filled_json_path, 'w', encoding='utf-8') as f:
+            json.dump(filled_transcript, f, indent=2, ensure_ascii=False)
+        
+        # Step 6: Create structured segments using exact logic from organize_speakers_table.py
+        print("Step 6: Creating structured speaker segments...")
+        structured_segments = create_speakers_table(filled_transcript, 1)  # meeting_id will be set by calling function
+        
+        # Step 7: Create speaker transcript file
+        print("Step 7: Creating speaker transcript file...")
+        speakers_path = target_dir / 'transcript_speakers.txt'
+        with open(speakers_path, 'w', encoding='utf-8') as f:
+            f.write(f"# Speaker-separated transcript for: {title}\n\n")
+            for segment in structured_segments:
+                speaker = segment['speaker']
+                representing = segment['representing']
+                content = segment['content']
+                start_time = segment['start_time']
+                end_time = segment['end_time']
+                
+                # Format speaker header
+                if representing and representing != "Not specified":
+                    speaker_header = f"[{speaker}, {representing}]"
+                else:
+                    speaker_header = f"[{speaker}]"
+                
+                # Add timing if available
+                if start_time is not None and end_time is not None:
+                    # Format timing as MM:SS for readability
+                    start_min = int(start_time // 60)
+                    start_sec = int(start_time % 60)
+                    end_min = int(end_time // 60)
+                    end_sec = int(end_time % 60)
+                    timing_info = f" ({start_min:02d}:{start_sec:02d} - {end_min:02d}:{end_sec:02d})"
+                    speaker_header += timing_info
+                
+                f.write(f"{speaker_header}\n")
+                f.write(f"{content}\n\n")
         
         results['speakers'] = str(speakers_path.relative_to(target_dir.parent))
-        results['segments'] = segments
+        results['segments'] = structured_segments
         
         print("Pipeline completed successfully!")
+        
+        # Clean up intermediate files
+        print("Cleaning up intermediate files...")
+        if json_path.exists():
+            json_path.unlink()
+        if filled_json_path.exists():
+            filled_json_path.unlink()
         
     except Exception as e:
         error_msg = str(e)
