@@ -1,0 +1,259 @@
+{% extends "base.html" %}
+
+{% block title %}User Management - ITU Intern{% endblock %}
+
+{% block content %}
+<div class="container-xl py-4">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h1 class="h3 mb-0">User Management</h1>
+        <a href="{{ url_for('main.admin_dashboard') }}" class="btn btn-outline-primary">
+            <i class="bi bi-arrow-left me-2"></i>Back to Dashboard
+        </a>
+    </div>
+
+    <!-- Add Users Section -->
+    <div class="row mb-4">
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="card-title mb-0">Add Single User</h5>
+                </div>
+                <div class="card-body">
+                    <form method="POST" action="{{ url_for('main.admin_add_user') }}">
+                        {{ add_user_form.hidden_tag() }}
+                        <div class="mb-3">
+                            {{ add_user_form.email.label(class="form-label") }}
+                            {{ add_user_form.email(class="form-control", placeholder="user@example.com") }}
+                        </div>
+                        <div class="d-grid">
+                            {{ add_user_form.submit(class="btn btn-primary") }}
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+        
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="card-title mb-0">Bulk Add Users</h5>
+                </div>
+                <div class="card-body">
+                    <form method="POST" action="{{ url_for('main.admin_bulk_add_users') }}">
+                        {{ bulk_add_form.hidden_tag() }}
+                        <div class="mb-3">
+                            {{ bulk_add_form.emails.label(class="form-label") }}
+                            {{ bulk_add_form.emails(class="form-control", rows="4", placeholder="user1@example.com\nuser2@example.com\nuser3@example.com") }}
+                            <div class="form-text">Enter one email address per line</div>
+                        </div>
+                        <div class="d-grid">
+                            {{ bulk_add_form.submit(class="btn btn-success") }}
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Registered Users Section -->
+    <div class="card mb-4">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <h5 class="card-title mb-0">Registered Users ({{ users.total }})</h5>
+            <!-- User Management Form -->
+            <div class="dropdown">
+                <button class="btn btn-outline-secondary btn-sm dropdown-toggle" type="button" data-bs-toggle="dropdown">
+                    <i class="bi bi-gear me-1"></i>Manage User
+                </button>
+                <div class="dropdown-menu p-3" style="min-width: 300px;">
+                    <form method="POST" action="{{ url_for('main.admin_manage_user') }}">
+                        {{ admin_user_form.hidden_tag() }}
+                        <div class="mb-3">
+                            {{ admin_user_form.user_id.label(class="form-label") }}
+                            {{ admin_user_form.user_id(class="form-select form-select-sm") }}
+                        </div>
+                        <div class="mb-3">
+                            {{ admin_user_form.action.label(class="form-label") }}
+                            {{ admin_user_form.action(class="form-select form-select-sm") }}
+                        </div>
+                        <div class="d-grid">
+                            {{ admin_user_form.submit(class="btn btn-primary btn-sm") }}
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+        <div class="card-body p-0">
+            {% if users.items %}
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Email</th>
+                                <th>Role</th>
+                                <th>Status</th>
+                                <th>Joined</th>
+                                <th>Last Login</th>
+                                <th>Meetings</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for user in users.items %}
+                                <tr>
+                                    <td>
+                                        <strong>{{ user.email }}</strong>
+                                        {% if user.id == current_user.id %}
+                                            <span class="badge bg-info ms-1">You</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        {% if user.is_admin %}
+                                            <span class="badge bg-primary">Admin</span>
+                                        {% else %}
+                                            <span class="badge bg-secondary">User</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        {% if user.is_active %}
+                                            <span class="badge bg-success">Active</span>
+                                        {% else %}
+                                            <span class="badge bg-danger">Inactive</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        <small>{{ user.created_at.strftime('%b %d, %Y') }}</small>
+                                    </td>
+                                    <td>
+                                        {% if user.last_login %}
+                                            <small>{{ user.last_login.strftime('%b %d, %Y') }}</small>
+                                        {% else %}
+                                            <small class="text-muted">Never</small>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        <small>{{ user.meetings_created|length }} meetings</small>
+                                    </td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+                
+                <!-- Pagination -->
+                {% if users.pages > 1 %}
+                    <div class="card-footer">
+                        <nav aria-label="User pagination">
+                            <ul class="pagination pagination-sm mb-0 justify-content-center">
+                                {% if users.has_prev %}
+                                    <li class="page-item">
+                                        <a class="page-link" href="{{ url_for('main.admin_users', page=users.prev_num) }}">
+                                            <i class="bi bi-chevron-left"></i>
+                                        </a>
+                                    </li>
+                                {% endif %}
+                                
+                                {% for page_num in users.iter_pages(left_edge=1, right_edge=1, left_current=1, right_current=2) %}
+                                    {% if page_num %}
+                                        {% if page_num != users.page %}
+                                            <li class="page-item">
+                                                <a class="page-link" href="{{ url_for('main.admin_users', page=page_num) }}">{{ page_num }}</a>
+                                            </li>
+                                        {% else %}
+                                            <li class="page-item active">
+                                                <span class="page-link">{{ page_num }}</span>
+                                            </li>
+                                        {% endif %}
+                                    {% else %}
+                                        <li class="page-item disabled">
+                                            <span class="page-link">…</span>
+                                        </li>
+                                    {% endif %}
+                                {% endfor %}
+                                
+                                {% if users.has_next %}
+                                    <li class="page-item">
+                                        <a class="page-link" href="{{ url_for('main.admin_users', page=users.next_num) }}">
+                                            <i class="bi bi-chevron-right"></i>
+                                        </a>
+                                    </li>
+                                {% endif %}
+                            </ul>
+                        </nav>
+                    </div>
+                {% endif %}
+            {% else %}
+                <div class="p-4 text-center text-muted">
+                    <i class="bi bi-people fs-1 mb-3"></i>
+                    <p class="mb-0">No registered users yet.</p>
+                </div>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Allowed Users Section -->
+    <div class="card">
+        <div class="card-header">
+            <h5 class="card-title mb-0">Allowed Users ({{ allowed_users|length }})</h5>
+        </div>
+        <div class="card-body p-0">
+            {% if allowed_users %}
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Email</th>
+                                <th>Status</th>
+                                <th>Added By</th>
+                                <th>Added On</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for allowed_user in allowed_users %}
+                                <tr>
+                                    <td>{{ allowed_user.email }}</td>
+                                    <td>
+                                        {% if allowed_user.is_used %}
+                                            <span class="badge bg-success">Registered</span>
+                                        {% else %}
+                                            <span class="badge bg-warning">Pending</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        {% if allowed_user.added_by %}
+                                            <small>{{ allowed_user.added_by.email }}</small>
+                                        {% else %}
+                                            <small class="text-muted">System</small>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        <small>{{ allowed_user.added_at.strftime('%b %d, %Y') }}</small>
+                                    </td>
+                                    <td>
+                                        {% if not allowed_user.is_used %}
+                                            <form method="POST" action="{{ url_for('main.admin_delete_allowed_user', allowed_user_id=allowed_user.id) }}" 
+                                                  class="d-inline" onsubmit="return confirm('Remove {{ allowed_user.email }} from allowed users list?')">
+                                                <button type="submit" class="btn btn-outline-danger btn-sm">
+                                                    <i class="bi bi-trash" style="font-size: 12px;"></i>
+                                                </button>
+                                            </form>
+                                        {% else %}
+                                            <span class="text-muted">
+                                                <i class="bi bi-check-circle" style="font-size: 12px;"></i>
+                                            </span>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            {% else %}
+                <div class="p-4 text-center text-muted">
+                    <i class="bi bi-person-plus fs-1 mb-3"></i>
+                    <p class="mb-0">No allowed users yet. Add some emails above to allow registration.</p>
+                </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %} 

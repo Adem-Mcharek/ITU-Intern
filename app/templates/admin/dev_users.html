@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+
+{% block title %}Developer User Management{% endblock %}
+
+{% block content %}
+<div class="container-xl">
+    <!-- Header -->
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <div>
+            <h1 class="mb-2">Developer User Management</h1>
+            <p class="text-muted mb-0">Manage user privileges and system access</p>
+        </div>
+        <div class="d-flex gap-2">
+            <a href="{{ url_for('main.dev_dashboard') }}" class="btn btn-outline-secondary">
+                <svg width="16" height="16" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                    <path d="M3 2v4.586l7 7L14.586 9l-7-7H3z"/>
+                </svg>
+                Back to Dashboard
+            </a>
+        </div>
+    </div>
+
+    <!-- Developer Actions -->
+    <div class="row mb-4">
+        <div class="col-lg-6">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="card-title mb-0">Create Admin/Developer User</h5>
+                </div>
+                <div class="card-body">
+                    <form method="POST" action="{{ url_for('main.dev_create_admin') }}">
+                        {{ create_admin_form.hidden_tag() }}
+                        <div class="mb-3">
+                            {{ create_admin_form.email.label(class="form-label") }}
+                            {{ create_admin_form.email(class="form-control") }}
+                        </div>
+                        <div class="mb-3">
+                            {{ create_admin_form.password.label(class="form-label") }}
+                            {{ create_admin_form.password(class="form-control") }}
+                        </div>
+                        <div class="mb-3">
+                            {{ create_admin_form.password2.label(class="form-label") }}
+                            {{ create_admin_form.password2(class="form-control") }}
+                        </div>
+                        <div class="mb-3">
+                            <div class="form-check">
+                                {{ create_admin_form.is_admin(class="form-check-input") }}
+                                {{ create_admin_form.is_admin.label(class="form-check-label") }}
+                            </div>
+                        </div>
+                        <div class="mb-3">
+                            <div class="form-check">
+                                {{ create_admin_form.is_developer(class="form-check-input") }}
+                                {{ create_admin_form.is_developer.label(class="form-check-label") }}
+                            </div>
+                        </div>
+                        {{ create_admin_form.submit(class="btn btn-success") }}
+                    </form>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-6">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="card-title mb-0">Manage User Privileges</h5>
+                </div>
+                <div class="card-body">
+                    <form method="POST" action="{{ url_for('main.dev_manage_user') }}">
+                        {{ dev_user_form.hidden_tag() }}
+                        <div class="mb-3">
+                            {{ dev_user_form.user_id.label(class="form-label") }}
+                            {{ dev_user_form.user_id(class="form-select") }}
+                        </div>
+                        <div class="mb-3">
+                            {{ dev_user_form.action.label(class="form-label") }}
+                            {{ dev_user_form.action(class="form-select") }}
+                        </div>
+                        {{ dev_user_form.submit(class="btn btn-warning") }}
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- All Users Table -->
+    <div class="card">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <h5 class="card-title mb-0">All Users ({{ users.total }})</h5>
+            <div class="d-flex gap-2">
+                {% set developer_count = users.items|selectattr('is_developer')|list|length %}
+                {% set admin_count = users.items|selectattr('is_admin')|list|length %}
+                {% set user_count = users.items|length - admin_count %}
+                <span class="badge bg-success">{{ developer_count }} Developers</span>
+                <span class="badge bg-info">{{ admin_count }} Admins</span>
+                <span class="badge bg-secondary">{{ user_count }} Regular Users</span>
+            </div>
+        </div>
+        <div class="card-body p-0">
+            {% if users.items %}
+                <div class="table-responsive">
+                    <table class="table table-hover mb-0">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Email</th>
+                                <th>Role</th>
+                                <th>Status</th>
+                                <th>Created</th>
+                                <th>Last Login</th>
+                                <th>Meetings</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for user in users.items %}
+                                <tr>
+                                    <td>
+                                        <strong>{{ user.email }}</strong>
+                                        {% if user.id == current_user.id %}
+                                            <small class="text-muted">(You)</small>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        <span class="badge bg-{{ 'success' if user.is_developer else ('info' if user.is_admin else 'secondary') }}">
+                                            {{ user.role }}
+                                        </span>
+                                    </td>
+                                    <td>
+                                        {% if user.is_active %}
+                                            <span class="badge bg-success">Active</span>
+                                        {% else %}
+                                            <span class="badge bg-danger">Inactive</span>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        <small class="text-muted">{{ user.created_at.strftime('%Y-%m-%d') }}</small>
+                                    </td>
+                                    <td>
+                                        {% if user.last_login %}
+                                            <small class="text-muted">{{ user.last_login.strftime('%Y-%m-%d %H:%M') }}</small>
+                                        {% else %}
+                                            <small class="text-muted">Never</small>
+                                        {% endif %}
+                                    </td>
+                                    <td>
+                                        <small class="text-muted">{{ user.meetings_created|length }}</small>
+                                    </td>
+                                </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            {% else %}
+                <div class="text-center py-4">
+                    <p class="text-muted mb-0">No users found.</p>
+                </div>
+            {% endif %}
+        </div>
+    </div>
+</div>
+{% endblock %} 

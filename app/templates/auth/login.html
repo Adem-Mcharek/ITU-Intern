@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+
+{% block title %}Login - ITU Intern{% endblock %}
+
+{% block content %}
+<div class="container py-5">
+    <div class="row justify-content-center">
+        <div class="col-md-6 col-lg-4">
+            <div class="card shadow">
+                <div class="card-body p-4">
+                    <div class="text-center mb-4">
+                        <img src="{{ url_for('static', filename='img/ITU.png') }}" alt="ITU Logo" style="height: 60px;" class="mb-3">
+                        <h3 class="card-title">Sign In</h3>
+                        <p class="text-muted">Access ITU Intern</p>
+                    </div>
+
+                    <form method="POST">
+                        {{ form.hidden_tag() }}
+                        
+                        <div class="mb-3">
+                            {{ form.email.label(class="form-label") }}
+                            {{ form.email(class="form-control" + (" is-invalid" if form.email.errors else ""), placeholder="Enter your email") }}
+                            {% if form.email.errors %}
+                                <div class="invalid-feedback">
+                                    {{ form.email.errors[0] }}
+                                </div>
+                            {% endif %}
+                        </div>
+                        
+                        <div class="mb-3">
+                            {{ form.password.label(class="form-label") }}
+                            {{ form.password(class="form-control" + (" is-invalid" if form.password.errors else ""), placeholder="Enter your password") }}
+                            {% if form.password.errors %}
+                                <div class="invalid-feedback">
+                                    {{ form.password.errors[0] }}
+                                </div>
+                            {% endif %}
+                        </div>
+                        
+                        <div class="mb-3 form-check">
+                            {{ form.remember_me(class="form-check-input") }}
+                            {{ form.remember_me.label(class="form-check-label") }}
+                        </div>
+                        
+                        <div class="d-grid mb-3">
+                            {{ form.submit(class="btn btn-primary") }}
+                        </div>
+                    </form>
+                    
+                    <div class="text-center">
+                        <p class="mb-0">
+                            <small class="text-muted">
+                                Don't have an account? 
+                                <a href="{{ url_for('main.signup') }}" class="text-decoration-none">Sign up here</a>
+                            </small>
+                        </p>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %} 

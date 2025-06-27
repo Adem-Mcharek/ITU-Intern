@@ -1,5 +1,6 @@
 """
-Simple Background Tasks - Threading-based
+Simple Background Tasks - Threading-based (ORIGINAL VERSION - BACKUP)
+This file is kept for reference. The new queue system is in queue_manager.py
 """
 import threading
 import time
@@ -51,32 +52,6 @@ def start_processing(meeting):
                         end_time=segment_data.get('end_time')
                     )
                     db.session.add(segment)
-                
-                # Generate ITU-focused summary after pipeline completion
-                print("Step 8: Generating ITU-focused meeting summary...")
-                try:
-                    from app.meeting_summarizer import process_meeting_summary
-                    summary_success = process_meeting_summary(meeting_obj.id, meeting_dir)
-                    if summary_success:
-                        print(f"✅ ITU summary generated successfully for meeting {meeting_obj.id}")
-                    else:
-                        print(f"⚠️  ITU summary generation failed for meeting {meeting_obj.id}")
-                except Exception as e:
-                    print(f"⚠️  Error generating ITU summary: {e}")
-                    # Don't fail the entire processing if summary fails
-                
-                # Generate professional meeting notes after summary completion
-                print("Step 9: Generating professional meeting notes...")
-                try:
-                    from app.meeting_notes_generator import process_meeting_notes
-                    notes_success = process_meeting_notes(meeting_obj.id, meeting_dir, meeting_obj.title)
-                    if notes_success:
-                        print(f"✅ Meeting notes generated successfully for meeting {meeting_obj.id}")
-                    else:
-                        print(f"⚠️  Meeting notes generation failed for meeting {meeting_obj.id}")
-                except Exception as e:
-                    print(f"⚠️  Error generating meeting notes: {e}")
-                    # Don't fail the entire processing if notes generation fails
                 
                 db.session.commit()
                 

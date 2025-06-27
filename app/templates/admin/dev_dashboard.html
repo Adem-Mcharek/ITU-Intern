@@ -1,0 +1,232 @@
+{% extends "base.html" %}
+
+{% block title %}Developer Dashboard{% endblock %}
+
+{% block content %}
+<div class="container-xl">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <div>
+            <h1 class="mb-2">Developer Dashboard</h1>
+            <p class="text-muted mb-0">Advanced system management and user privilege controls</p>
+        </div>
+        <div class="d-flex gap-2">
+            <a href="{{ url_for('main.dev_users') }}" class="btn btn-primary">
+                <svg width="16" height="16" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                    <path d="M13 0H6a2 2 0 0 0-2 2 2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h7a2 2 0 0 0 2-2 2 2 0 0 0 2-2V2a2 2 0 0 0-2-2z"/>
+                </svg>
+                User Management
+            </a>
+            <a href="{{ url_for('main.admin_dashboard') }}" class="btn btn-outline-secondary">
+                <svg width="16" height="16" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                    <path d="M9.405 1.05c-.413-1.4-2.397-1.4-2.81 0l-.1.34a1.464 1.464 0 0 1-2.105.872l-.31-.17c-1.283-.698-2.686.705-1.987 1.987l.169.311c.446.82.023 1.841-.872 2.105l-.34.1c-1.4.413-1.4 2.397 0 2.81l.34.1a1.464 1.464 0 0 1 .872 2.105l-.17.31c-.698 1.283.705 2.686 1.987 1.987l.311-.169a1.464 1.464 0 0 1 2.105.872l.1.34c.413 1.4 2.397 1.4 2.81 0l.1-.34a1.464 1.464 0 0 1 2.105-.872l.31.17c1.283.698 2.686-.705 1.987-1.987l-.169-.311a1.464 1.464 0 0 1 .872-2.105l.34-.1c1.4-.413 1.4-2.397 0-2.81l-.34-.1a1.464 1.464 0 0 1-.872-2.105l.17-.31c.698-1.283-.705-2.686-1.987-1.987l-.311.169a1.464 1.464 0 0 1-2.105-.872l-.1-.34z"/>
+                </svg>
+                Admin Dashboard
+            </a>
+        </div>
+    </div>
+
+    <!-- System Statistics -->
+    <div class="row mb-4">
+        <div class="col-md-3">
+            <div class="card bg-primary text-white">
+                <div class="card-body">
+                    <div class="d-flex align-items-center">
+                        <div class="me-3">
+                            <svg width="32" height="32" fill="currentColor" viewBox="0 0 16 16">
+                                <path d="M15 14s1 0 1-1-1-4-5-4-5 3-5 4 1 1 1 1h8z"/>
+                                <path d="M11 7a2 2 0 1 0 0-4 2 2 0 0 0 0 4z"/>
+                            </svg>
+                        </div>
+                        <div>
+                            <h5 class="mb-0">{{ total_users }}</h5>
+                            <small>Total Users</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card bg-success text-white">
+                <div class="card-body">
+                    <div class="d-flex align-items-center">
+                        <div class="me-3">
+                            <svg width="32" height="32" fill="currentColor" viewBox="0 0 16 16">
+                                <path d="M6.5 1A1.5 1.5 0 0 0 5 2.5V3H1.5A1.5 1.5 0 0 0 0 4.5v1.384l7.614 2.03a1.5 1.5 0 0 0 .772 0L16 5.884V4.5A1.5 1.5 0 0 0 14.5 3H11v-.5A1.5 1.5 0 0 0 9.5 1h-3z"/>
+                                <path d="M0 12.5A1.5 1.5 0 0 0 1.5 14h13a1.5 1.5 0 0 0 1.5-1.5V6.85L8.129 8.947a.5.5 0 0 1-.258 0L0 6.85v5.65z"/>
+                            </svg>
+                        </div>
+                        <div>
+                            <h5 class="mb-0">{{ developer_users }}</h5>
+                            <small>Developers</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card bg-info text-white">
+                <div class="card-body">
+                    <div class="d-flex align-items-center">
+                        <div class="me-3">
+                            <svg width="32" height="32" fill="currentColor" viewBox="0 0 16 16">
+                                <path d="M9.405 1.05c-.413-1.4-2.397-1.4-2.81 0l-.1.34a1.464 1.464 0 0 1-2.105.872l-.31-.17c-1.283-.698-2.686.705-1.987 1.987l.169.311c.446.82.023 1.841-.872 2.105l-.34.1c-1.4.413-1.4 2.397 0 2.81l.34.1a1.464 1.464 0 0 1 .872 2.105l-.17.31c-.698 1.283.705 2.686 1.987 1.987l.311-.169a1.464 1.464 0 0 1 2.105.872l.1.34c.413 1.4 2.397 1.4 2.81 0l.1-.34a1.464 1.464 0 0 1 2.105-.872l.31.17c1.283.698 2.686-.705 1.987-1.987l-.169-.311a1.464 1.464 0 0 1 .872-2.105l.34-.1c1.4-.413 1.4-2.397 0-2.81l-.34-.1a1.464 1.464 0 0 1-.872-2.105l.17-.31c.698-1.283-.705-2.686-1.987-1.987l-.311.169a1.464 1.464 0 0 1-2.105-.872l-.1-.34z"/>
+                            </svg>
+                        </div>
+                        <div>
+                            <h5 class="mb-0">{{ admin_users }}</h5>
+                            <small>Admins</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card bg-warning text-white">
+                <div class="card-body">
+                    <div class="d-flex align-items-center">
+                        <div class="me-3">
+                            <svg width="32" height="32" fill="currentColor" viewBox="0 0 16 16">
+                                <path d="M6 2a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H6z"/>
+                            </svg>
+                        </div>
+                        <div>
+                            <h5 class="mb-0">{{ meetings_count }}</h5>
+                            <small>Total Meetings</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- User Status Overview -->
+    <div class="row mb-4">
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="card-title mb-0">User Status Overview</h5>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-6">
+                            <div class="text-center">
+                                <h3 class="text-success mb-1">{{ active_users }}</h3>
+                                <p class="text-muted mb-0">Active Users</p>
+                            </div>
+                        </div>
+                        <div class="col-6">
+                            <div class="text-center">
+                                <h3 class="text-danger mb-1">{{ inactive_users }}</h3>
+                                <p class="text-muted mb-0">Inactive Users</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-header">
+                    <h5 class="card-title mb-0">Registration Overview</h5>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-6">
+                            <div class="text-center">
+                                <h3 class="text-primary mb-1">{{ allowed_users_count }}</h3>
+                                <p class="text-muted mb-0">Allowed Emails</p>
+                            </div>
+                        </div>
+                        <div class="col-6">
+                            <div class="text-center">
+                                <h3 class="text-warning mb-1">{{ unused_allowed_count }}</h3>
+                                <p class="text-muted mb-0">Unused Invites</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Recent Activity -->
+    <div class="row">
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h5 class="card-title mb-0">Recent Users</h5>
+                    <a href="{{ url_for('main.dev_users') }}" class="btn btn-sm btn-outline-primary">View All</a>
+                </div>
+                <div class="card-body">
+                    {% if recent_users %}
+                        <div class="list-group list-group-flush">
+                            {% for user in recent_users %}
+                                <div class="list-group-item px-0">
+                                    <div class="d-flex justify-content-between align-items-center">
+                                        <div>
+                                            <h6 class="mb-1">{{ user.email }}</h6>
+                                            <p class="mb-0 text-muted">
+                                                <span class="badge bg-{{ 'success' if user.is_developer else ('info' if user.is_admin else 'secondary') }}">
+                                                    {{ user.role }}
+                                                </span>
+                                                <span class="ms-2">{{ user.created_at.strftime('%Y-%m-%d') }}</span>
+                                            </p>
+                                        </div>
+                                        <div>
+                                            {% if user.is_active %}
+                                                <span class="badge bg-success">Active</span>
+                                            {% else %}
+                                                <span class="badge bg-danger">Inactive</span>
+                                            {% endif %}
+                                        </div>
+                                    </div>
+                                </div>
+                            {% endfor %}
+                        </div>
+                    {% else %}
+                        <p class="text-muted mb-0">No users found.</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="card">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h5 class="card-title mb-0">Recent Meetings</h5>
+                    <a href="{{ url_for('main.meetings') }}" class="btn btn-sm btn-outline-primary">View All</a>
+                </div>
+                <div class="card-body">
+                    {% if recent_meetings %}
+                        <div class="list-group list-group-flush">
+                            {% for meeting in recent_meetings %}
+                                <div class="list-group-item px-0">
+                                    <div class="d-flex justify-content-between align-items-center">
+                                        <div class="flex-grow-1">
+                                            <h6 class="mb-1">
+                                                <a href="{{ url_for('main.meeting_detail', id=meeting.id) }}" class="text-decoration-none">
+                                                    {{ meeting.title[:50] }}{{ '...' if meeting.title|length > 50 else '' }}
+                                                </a>
+                                            </h6>
+                                            <p class="mb-0 text-muted">
+                                                {{ meeting.created_at.strftime('%Y-%m-%d %H:%M') }}
+                                                {% if meeting.created_by %}
+                                                    • by {{ meeting.created_by.email.split('@')[0] }}
+                                                {% endif %}
+                                            </p>
+                                        </div>
+                                        <div class="ms-3">
+                                            <span class="badge {{ meeting.status_badge_class }}">{{ meeting.status.title() }}</span>
+                                        </div>
+                                    </div>
+                                </div>
+                            {% endfor %}
+                        </div>
+                    {% else %}
+                        <p class="text-muted mb-0">No meetings found.</p>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %} 

@@ -1,10 +1,14 @@
 """
 Flask WebTV Processing App - Simple Configuration
 """
+import logging
 import os
+from logging.handlers import RotatingFileHandler
 from flask import Flask
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
+from flask_login import LoginManager
+from config import Config
 
 # Try to load environment variables from .env file (optional)
 try:
@@ -17,10 +21,12 @@ except ImportError:
 # Initialize extensions
 db = SQLAlchemy()
 migrate = Migrate()
+login = LoginManager()
 
-def create_app():
+def create_app(config_class=Config):
     """Create and configure the Flask application"""
     app = Flask(__name__)
+    app.config.from_object(config_class)
     
     # Simple configuration with optional environment variable overrides
     app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
@@ -52,11 +58,42 @@ def create_app():
     db.init_app(app)
     migrate.init_app(app, db)
     
+    # Initialize Flask-Login
+    login.init_app(app)
+    login.login_view = 'main.login'
+    login.login_message = 'Please log in to access this page.'
+    login.login_message_category = 'info'
+    
+    @login.user_loader
+    def load_user(user_id):
+        from app.models import User
+        return User.query.get(int(user_id))
+    
     # Register blueprints
-    from app.routes import main_bp
+    from app.routes import bp as main_bp
     app.register_blueprint(main_bp)
     
-    # Import models for migrations
-    from app import models
+    # Start queue worker (unless explicitly skipped during migration)
+    if not os.environ.get('SKIP_QUEUE_WORKER'):
+        from app.queue_manager import queue_manager
+        queue_manager.start_worker(app)
+    else:
+        print("Skipping queue worker startup (migration mode)")
+    
+    if not app.debug and not app.testing:
+        # Create logs directory if it doesn't exist
+        if not os.path.exists('logs'):
+            os.mkdir('logs')
+        
+        # Set up logging
+        file_handler = RotatingFileHandler('logs/itu_intern.log', 
+                                         maxBytes=10240, backupCount=10)
+        file_handler.setFormatter(logging.Formatter(
+            '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'))
+        file_handler.setLevel(logging.INFO)
+        app.logger.addHandler(file_handler)
+        
+        app.logger.setLevel(logging.INFO)
+        app.logger.info('ITU Intern startup')
     
     return app 

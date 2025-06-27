@@ -150,8 +150,11 @@ class StatusUpdater {
             this.updateStatusDisplay(statusContainer, data);
         }
         
+        // Update queue information
+        this.updateQueueInfo(data);
+        
         // Stop polling if processing is complete
-        if (data.status === 'done' || data.status === 'error') {
+        if (data.status === 'completed' || data.status === 'done' || data.status === 'error') {
             this.stopStatusUpdate(meetingId);
             
             // Reload page after a short delay to show final state
@@ -165,7 +168,7 @@ class StatusUpdater {
         const spinner = container.querySelector('.spinner-border');
         const statusText = container.querySelector('span');
         
-        if (data.status === 'done') {
+        if (data.status === 'completed' || data.status === 'done') {
             if (spinner) spinner.style.display = 'none';
             if (statusText) {
                 statusText.innerHTML = `
@@ -191,7 +194,53 @@ class StatusUpdater {
             if (statusText) {
                 statusText.textContent = 'Processing in progress... This may take several minutes depending on video length.';
             }
+        } else if (data.status === 'queued') {
+            if (statusText) {
+                let queueText = 'Queued for processing';
+                if (data.queue_position && data.queue_position > 0) {
+                    queueText += ` (Position: ${data.queue_position})`;
+                }
+                if (data.estimated_wait_time) {
+                    queueText += ` - Estimated wait: ${data.estimated_wait_time}`;
+                }
+                statusText.textContent = queueText;
+            }
         }
+    }
+    
+    updateQueueInfo(data) {
+        // Update any queue information displays on the page
+        const queueInfoElements = document.querySelectorAll('.queue-info');
+        queueInfoElements.forEach(element => {
+            if (data.queue_position && data.queue_position > 0) {
+                element.textContent = `Position in queue: ${data.queue_position}`;
+                element.style.display = 'block';
+            } else {
+                element.style.display = 'none';
+            }
+        });
+        
+        // Update queue length display for admin/developer panels
+        const queueLengthElements = document.querySelectorAll('.queue-length');
+        queueLengthElements.forEach(element => {
+            if (data.queue_length !== undefined) {
+                element.textContent = data.queue_length;
+            }
+        });
+        
+        // Update currently processing display
+        const currentlyProcessingElements = document.querySelectorAll('.currently-processing');
+        currentlyProcessingElements.forEach(element => {
+            if (data.currently_processing_id) {
+                element.style.display = 'block';
+                const linkElement = element.querySelector('a');
+                if (linkElement) {
+                    linkElement.href = `/meetings/${data.currently_processing_id}`;
+                }
+            } else {
+                element.style.display = 'none';
+            }
+        });
     }
     
     stopStatusUpdate(meetingId) {
