@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-Flask WebTV Processing App - Entry Point
+ITU WebTV Processing System
+Copyright (c) 2025 Adem Mcharek
+Licensed under the MIT License - see LICENSE file for details
 """
 import os
 import logging

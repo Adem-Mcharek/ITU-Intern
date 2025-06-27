@@ -112,6 +112,10 @@ def setup_gemini_api():
         return genai.GenerativeModel(MODEL_NAME)
     return None
 
+def is_un_webtv_url(url: str) -> bool:
+    """Check if the URL is from UN WebTV"""
+    return 'webtv.un.org' in url.lower() or 'un.org' in url.lower()
+
 def _slug_to_entry_id(slug: str) -> str:
     """Convert UN WebTV slug to Kaltura entry ID."""
     if not slug.startswith("k1"):
@@ -125,10 +129,10 @@ def _extract_slug(url: str) -> str:
         raise ValueError("URL does not look like a UN Web TV asset link.")
     return m.group(1)
 
-def download_audio(url: str, out_dir: str) -> Tuple[Path, Dict]:
+def download_audio_un_webtv(url: str, out_dir: str) -> Tuple[Path, Dict]:
     """
     Enhanced UN WebTV audio download with English audio prioritization
-    Returns: (audio_path, metadata)
+    (Keeps all existing optimizations for WebTV content)
     """
     if not YT_DLP_AVAILABLE:
         raise Exception("yt-dlp is not installed. Please install it to enable video processing.")
@@ -142,7 +146,7 @@ def download_audio(url: str, out_dir: str) -> Tuple[Path, Dict]:
         entry_id = _slug_to_entry_id(slug)
         kaltura_url = f"kaltura:{PARTNER_ID}:{entry_id}"
     except ValueError:
-        # Fallback to original URL if not UN WebTV format
+        # Fallback to original URL if not standard UN WebTV format
         kaltura_url = url
         slug = "unknown"
         entry_id = "unknown"
@@ -159,6 +163,265 @@ def download_audio(url: str, out_dir: str) -> Tuple[Path, Dict]:
         "bestaudio/best"
     ]
     
+    return _download_with_yt_dlp(kaltura_url, out_dir, format_selectors, {
+        'slug': slug,
+        'entry_id': entry_id,
+        'source_type': 'UN WebTV'
+    })
+
+def download_audio_generic(url: str, out_dir: str) -> Tuple[Path, Dict]:
+    """
+    Generic audio download for non-UN WebTV sources
+    (YouTube, Vimeo, and other platforms supported by yt-dlp)
+    Enhanced with special YouTube handling for better reliability.
+    """
+    if not YT_DLP_AVAILABLE:
+        raise Exception("yt-dlp is not installed. Please install it to enable video processing.")
+    
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Check if this is a YouTube URL for special handling
+    is_youtube = 'youtube.com' in url or 'youtu.be' in url
+    
+    if is_youtube:
+        print("Detected YouTube URL - applying enhanced anti-detection measures")
+        return download_audio_youtube_enhanced(url, out_dir)
+    else:
+        # Generic format selectors for other platforms
+        format_selectors = [
+            # Best audio quality available
+            "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio",
+            # Fallback to best overall if no audio-only
+            "best[height<=720]/best"
+        ]
+        
+        return _download_with_yt_dlp(url, out_dir, format_selectors, {
+            'source_type': 'Generic Video Platform'
+        })
+
+def download_audio_youtube_enhanced(url: str, out_dir: str) -> Tuple[Path, Dict]:
+    """
+    Enhanced YouTube-specific audio download with anti-detection measures.
+    """
+    if not YT_DLP_AVAILABLE:
+        raise Exception("yt-dlp is not installed. Please install it to enable video processing.")
+        
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    
+    audio_path = out_dir / 'audio.mp3'
+    base = str(audio_path.with_suffix(''))
+    
+    # Enhanced YouTube-specific options with anti-detection
+    ydl_opts = {
+        'format': 'bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best[height<=720]',
+        'outtmpl': base + '.%(ext)s',
+        'extractaudio': True,
+        'audioformat': 'mp3',
+        'audioquality': '192k',
+        'postprocessors': [
+            {
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }
+        ],
+        'no_warnings': False,
+        'quiet': False,
+        'writeinfojson': True,
+        
+        # Anti-detection measures for YouTube
+        'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'referer': 'https://www.youtube.com/',
+        'http_headers': {
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-us,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+        },
+        
+        # YouTube-specific extractor options
+        'extractor_args': {
+            'youtube': {
+                'skip': ['hls', 'dash'],  # Skip potentially more restricted formats
+                'player_client': ['android', 'web'],  # Try different player clients
+                'player_skip': ['configs'],  # Skip config parsing that might trigger blocks
+            }
+        },
+        
+        # Retry and timeout settings
+        'retries': 3,
+        'fragment_retries': 3,
+        'socket_timeout': 30,
+        'extractor_retries': 3,
+    }
+    
+    metadata = {}
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # First, extract info to see available formats
+            try:
+                print("Extracting YouTube video information...")
+                info = ydl.extract_info(url, download=False)
+                formats = info.get('formats', [])
+                
+                # Extract metadata
+                metadata = {
+                    'title': info.get('title', 'Unknown'),
+                    'duration': info.get('duration', 0),
+                    'uploader': info.get('uploader', 'YouTube'),
+                    'upload_date': info.get('upload_date'),
+                    'description': info.get('description', ''),
+                    'formats_count': len(formats),
+                    'source_type': 'YouTube',
+                    'extraction_method': 'yt-dlp enhanced YouTube'
+                }
+                
+                # Log available audio formats
+                audio_formats = [f for f in formats if f.get('acodec') != 'none']
+                print(f"Found {len(audio_formats)} audio formats for YouTube video")
+                
+                # Show some format details for debugging
+                for fmt in audio_formats[:3]:  # Show first 3 audio formats
+                    format_note = fmt.get('format_note', '')
+                    abr = fmt.get('abr', 'unknown')
+                    print(f"  Format {fmt.get('format_id')}: {fmt.get('ext')} - {abr}kbps {format_note}")
+                
+            except Exception as e:
+                print(f"Warning: Could not extract format info: {e}")
+                metadata = {
+                    'title': 'Unknown', 
+                    'duration': 0, 
+                    'uploader': 'YouTube',
+                    'source_type': 'YouTube',
+                    'extraction_method': 'yt-dlp enhanced YouTube'
+                }
+            
+            # Download with enhanced options
+            print("Starting YouTube audio download...")
+            ydl.download([url])
+            
+            # Clean up info.json file
+            info_json_path = out_dir / f"audio.info.json"
+            if info_json_path.exists():
+                info_json_path.unlink()
+                
+            # Ensure we have the MP3 file
+            if not audio_path.exists():
+                # Look for any audio file that was downloaded
+                for file in out_dir.iterdir():
+                    if file.suffix.lower() in ['.mp3', '.m4a', '.wav', '.ogg', '.webm']:
+                        print(f"Converting {file.name} to audio.mp3")
+                        file.rename(audio_path)
+                        break
+                        
+            if not audio_path.exists():
+                raise FileNotFoundError("Audio file not found after download")
+                
+            metadata['file_size'] = audio_path.stat().st_size
+            print(f"YouTube audio download successful: {metadata['file_size']} bytes")
+            
+    except Exception as e:
+        error_msg = str(e)
+        print(f"YouTube download failed: {error_msg}")
+        
+        # If the enhanced method fails, try a fallback approach
+        if "403" in error_msg or "Forbidden" in error_msg or "Precondition" in error_msg:
+            print("Attempting fallback YouTube extraction method...")
+            return download_audio_youtube_fallback(url, out_dir)
+        else:
+            raise Exception(f"Failed to download audio from YouTube: {error_msg}")
+    
+    return audio_path, metadata
+
+def download_audio_youtube_fallback(url: str, out_dir: str) -> Tuple[Path, Dict]:
+    """
+    Fallback YouTube download method with conservative settings for difficult videos.
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    
+    audio_path = out_dir / 'audio.mp3'
+    base = str(audio_path.with_suffix(''))
+    
+    # Ultra-conservative options for stubborn YouTube videos
+    ydl_opts = {
+        'format': 'worst[acodec!=none]/worstaudio/worst',  # Get lowest quality to avoid detection
+        'outtmpl': base + '.%(ext)s',
+        'extractaudio': True,
+        'audioformat': 'mp3',
+        'audioquality': '128k',  # Lower quality for fallback
+        'postprocessors': [
+            {
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '128',
+            }
+        ],
+        'no_warnings': True,
+        'quiet': True,
+        'writeinfojson': False,
+        
+        # Conservative anti-detection
+        'user_agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36',
+        'sleep_interval': 2,  # Add delays
+        'max_sleep_interval': 5,
+        
+        # Use only web client, no experimental features
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['web'],
+                'skip': ['dash', 'hls'],
+            }
+        },
+        
+        # More conservative timeouts
+        'socket_timeout': 60,
+        'retries': 1,  # Don't retry too much to avoid detection
+        'fragment_retries': 1,
+        'extractor_retries': 1,
+    }
+    
+    metadata = {
+        'title': 'Unknown',
+        'duration': 0,
+        'uploader': 'YouTube',
+        'source_type': 'YouTube (Fallback)',
+        'extraction_method': 'yt-dlp conservative fallback'
+    }
+    
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            print("Attempting conservative YouTube download (fallback mode)...")
+            ydl.download([url])
+            
+            # Ensure we have the MP3 file
+            if not audio_path.exists():
+                for file in out_dir.iterdir():
+                    if file.suffix.lower() in ['.mp3', '.m4a', '.wav', '.ogg', '.webm']:
+                        print(f"Converting {file.name} to audio.mp3")
+                        file.rename(audio_path)
+                        break
+                        
+            if not audio_path.exists():
+                raise FileNotFoundError("Audio file not found after fallback download")
+                
+            metadata['file_size'] = audio_path.stat().st_size
+            print(f"YouTube fallback download successful: {metadata['file_size']} bytes")
+            
+    except Exception as e:
+        raise Exception(f"Failed to download audio from YouTube (even with fallback): {str(e)}")
+    
+    return audio_path, metadata
+
+def _download_with_yt_dlp(download_url: str, out_dir: Path, format_selectors: list, extra_metadata: dict) -> Tuple[Path, Dict]:
+    """
+    Common yt-dlp download function used by both UN WebTV and generic downloaders
+    """
     # Configure yt-dlp options for MP3 conversion
     audio_path = out_dir / 'audio.mp3'
     base = str(audio_path.with_suffix(''))
@@ -187,31 +450,35 @@ def download_audio(url: str, out_dir: str) -> Tuple[Path, Dict]:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             # First, extract info to see available formats
             try:
-                info = ydl.extract_info(kaltura_url, download=False)
+                info = ydl.extract_info(download_url, download=False)
                 formats = info.get('formats', [])
                 
                 # Extract metadata
                 metadata = {
                     'title': info.get('title', 'Unknown'),
                     'duration': info.get('duration', 0),
-                    'uploader': info.get('uploader', 'UN WebTV'),
+                    'uploader': info.get('uploader', extra_metadata.get('source_type', 'Unknown')),
                     'upload_date': info.get('upload_date'),
                     'description': info.get('description', ''),
                     'formats_count': len(formats),
-                    'slug': slug,
-                    'entry_id': entry_id
+                    **extra_metadata
                 }
                 
                 # Log available audio formats
                 audio_formats = [f for f in formats if f.get('acodec') != 'none']
-                print(f"Found {len(audio_formats)} audio formats, prioritizing English")
+                print(f"Found {len(audio_formats)} audio formats for {extra_metadata.get('source_type', 'video')}")
                 
             except Exception as e:
                 print(f"Warning: Could not extract format info: {e}")
-                metadata = {'title': 'Unknown', 'duration': 0, 'uploader': 'Unknown'}
+                metadata = {
+                    'title': 'Unknown', 
+                    'duration': 0, 
+                    'uploader': extra_metadata.get('source_type', 'Unknown'),
+                    **extra_metadata
+                }
             
-            # Download with enhanced format selector
-            ydl.download([kaltura_url])
+            # Download with format selector
+            ydl.download([download_url])
             
             # Clean up info.json file
             info_json_path = out_dir / f"audio.info.json"
@@ -232,8 +499,126 @@ def download_audio(url: str, out_dir: str) -> Tuple[Path, Dict]:
             metadata['file_size'] = audio_path.stat().st_size
             
     except Exception as e:
-        raise Exception(f"Failed to download audio: {str(e)}")
+        raise Exception(f"Failed to download audio from {extra_metadata.get('source_type', 'video source')}: {str(e)}")
     
+    return audio_path, metadata
+
+def download_audio(url: str, out_dir: str) -> Tuple[Path, Dict]:
+    """
+    Main audio download function that intelligently routes to the appropriate downloader
+    based on URL type. UN WebTV gets specialized handling, uploaded files skip download,
+    others use generic processing.
+    """
+    print(f"Analyzing URL: {url}")
+    
+    # Check for uploaded files (special URL format)
+    if url.startswith("file_upload://"):
+        print("Detected uploaded file - skipping download step")
+        return handle_uploaded_audio_file(url, out_dir)
+    elif is_un_webtv_url(url):
+        print("Detected UN WebTV URL - using specialized WebTV processing with English prioritization")
+        return download_audio_un_webtv(url, out_dir)
+    else:
+        print("Detected generic video URL - using standard video platform processing")
+        return download_audio_generic(url, out_dir)
+
+def handle_uploaded_audio_file(url: str, out_dir: str) -> Tuple[Path, Dict]:
+    """
+    Handle uploaded audio files by converting them to MP3 if needed and setting up metadata.
+    For uploaded files, the file should already be saved in the target directory.
+    """
+    out_dir = Path(out_dir)
+    filename = url.replace("file_upload://", "")
+    
+    print(f"Processing uploaded file: {filename}")
+    
+    # The file should already be saved during upload, but we need to ensure it's in MP3 format
+    audio_path = out_dir / 'audio.mp3'
+    
+    # Check if we already have the MP3 file (direct upload)
+    if audio_path.exists():
+        print("MP3 file already exists, using it directly")
+        metadata = {
+            'title': 'Uploaded Audio File',
+            'duration': 0,  # We'll try to get this from the file
+            'uploader': 'Direct Upload',
+            'source_type': 'File Upload',
+            'extraction_method': 'direct_upload',
+            'original_filename': filename,
+            'file_size': audio_path.stat().st_size
+        }
+    else:
+        # Look for other audio formats that need conversion
+        possible_extensions = ['.wav', '.m4a', '.ogg', '.flac']
+        source_file = None
+        
+        for ext in possible_extensions:
+            potential_file = out_dir / f'audio{ext}'
+            if potential_file.exists():
+                source_file = potential_file
+                break
+        
+        if not source_file:
+            raise FileNotFoundError(f"Could not find uploaded audio file in {out_dir}")
+        
+        print(f"Converting {source_file.name} to MP3 format...")
+        
+        # Use FFmpeg to convert to MP3 if available, otherwise copy/rename
+        try:
+            import subprocess
+            
+            # Try to convert using FFmpeg
+            cmd = [
+                'ffmpeg', '-i', str(source_file), 
+                '-acodec', 'mp3', '-ab', '192k', 
+                '-ar', '44100', '-ac', '2',
+                '-y',  # Overwrite output file
+                str(audio_path)
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            
+            if result.returncode == 0:
+                print("Successfully converted to MP3 using FFmpeg")
+                # Remove the original file
+                source_file.unlink()
+            else:
+                print(f"FFmpeg conversion failed: {result.stderr}")
+                # Fallback: just rename the file (may not be true MP3 but worth trying)
+                source_file.rename(audio_path)
+                print("Renamed file to MP3 extension (conversion may be needed later)")
+                
+        except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
+            print(f"FFmpeg not available or conversion failed: {e}")
+            # Fallback: just rename the file
+            source_file.rename(audio_path)
+            print("Renamed file to MP3 extension (conversion may be needed later)")
+        
+        metadata = {
+            'title': 'Uploaded Audio File',
+            'duration': 0,  # Duration will be determined during transcription
+            'uploader': 'Direct Upload',
+            'source_type': 'File Upload',
+            'extraction_method': 'file_conversion',
+            'original_filename': filename,
+            'original_format': source_file.suffix if 'source_file' in locals() else 'unknown',
+            'file_size': audio_path.stat().st_size
+        }
+    
+    # Try to get duration if possible
+    try:
+        import subprocess
+        cmd = ['ffprobe', '-v', 'quiet', '-show_entries', 'format=duration', 
+               '-of', 'csv=p=0', str(audio_path)]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0 and result.stdout.strip():
+            metadata['duration'] = float(result.stdout.strip())
+            print(f"Detected audio duration: {metadata['duration']:.1f} seconds")
+    except Exception as e:
+        print(f"Could not determine audio duration: {e}")
+        metadata['duration'] = 0
+    
+    print(f"Uploaded file processing complete: {metadata['file_size']} bytes")
     return audio_path, metadata
 
 def transcribe_audio(audio_path: Path, out_dir: str, model_size: str = "medium.en") -> Tuple[Path, Path]:

@@ -2,24 +2,58 @@
 Forms for WebTV Processing App
 """
 from flask_wtf import FlaskForm
-from wtforms import StringField, TextAreaField, URLField, SubmitField, SelectField, PasswordField, BooleanField
+from flask_wtf.file import FileField, FileAllowed, FileRequired
+from wtforms import StringField, TextAreaField, URLField, SubmitField, SelectField, PasswordField, BooleanField, RadioField
 from wtforms.validators import DataRequired, URL, Length, Optional, Email, EqualTo, ValidationError
 from app.models import User, AllowedUser
 
 class UrlForm(FlaskForm):
-    """Form for submitting UN WebTV URLs for processing"""
+    """Form for submitting video URLs or audio files for processing"""
+    input_type = RadioField(
+        'Input Type',
+        choices=[
+            ('url', 'Video URL'),
+            ('file', 'Audio File Upload')
+        ],
+        default='url',
+        validators=[DataRequired()]
+    )
     url = URLField(
-        'UN WebTV URL', 
-        validators=[DataRequired(), URL()],
-        description='Paste the full URL from UN WebTV (e.g., https://webtv.un.org/watch/...)',
+        'Video URL', 
+        validators=[Optional(), URL()],
+        description='Paste URL from UN WebTV, YouTube, Vimeo, or other supported video platforms',
         render_kw={'autocomplete': 'off', 'spellcheck': 'false'}
+    )
+    audio_file = FileField(
+        'Audio File',
+        validators=[
+            Optional(),
+            FileAllowed(['mp3', 'wav', 'm4a', 'ogg'], 'Audio files only! (MP3, WAV, M4A, OGG)')
+        ],
+        description='Upload an audio file (MP3, WAV, M4A, OGG)'
     )
     title = StringField(
         'Meeting Title', 
         validators=[DataRequired(), Length(min=3, max=256)],
         description='Enter a descriptive title for this meeting'
     )
-    submit = SubmitField('Process Video')
+    submit = SubmitField('Process Content')
+    
+    def validate(self, extra_validators=None):
+        """Custom validation to ensure either URL or file is provided"""
+        if not super().validate(extra_validators):
+            return False
+            
+        if self.input_type.data == 'url':
+            if not self.url.data:
+                self.url.errors.append('Video URL is required when URL input type is selected.')
+                return False
+        elif self.input_type.data == 'file':
+            if not self.audio_file.data:
+                self.audio_file.errors.append('Audio file is required when file upload input type is selected.')
+                return False
+                
+        return True
 
 class SearchForm(FlaskForm):
     """Form for searching meetings"""

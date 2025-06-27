@@ -140,6 +140,16 @@ instance/uploads/
 .DS_Store
 Thumbs.db
 
+# But keep these deployment files
+!env.example
+!init_db.py
+!create_admin.py
+!create_developer.py
+!DEPLOY.md
+!setup.bat
+!start.bat
+!start.sh
+
 # IDE
 .vscode/
 .idea/

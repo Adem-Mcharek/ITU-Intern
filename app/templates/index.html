@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% from '_components/status_badge.html' import status_badge %}
 
-{% block title %}ITU Intern - AI-powered WebTV Processor{% endblock %}
+{% block title %}ITU Intern - AI-powered Video Processor{% endblock %}
 
 {% block content %}
 <!-- Processing Form Section -->
@@ -9,25 +9,62 @@
     <div class="container-xl">
         <div class="row justify-content-center">
             <div class="col-lg-8">
-                <div class="text-center mb-5">
-                    <h1 class="mb-4">Process WebTV Content</h1>
-                    <p class="lead text-muted">Upload a UN WebTV URL to start automatic processing</p>
+                <div class="text-center mb-3">
+                    <div class="mb-4">
+                        <img src="{{ url_for('static', filename='img/ITU.png') }}" alt="ITU Logo" class="img-fluid" style="max-height: 120px; width: auto;">
+                    </div>
+                    <h1 class="mb-4">Process Video Content</h1>
+                    <p class="lead text-muted">Upload a video URL or audio file to start automatic processing</p>
                 </div>
                 
                 <div class="card shadow-medium border-0">
                     <div class="card-body">
-                        <form method="POST" class="needs-validation" novalidate>
+                        <form method="POST" enctype="multipart/form-data" class="needs-validation" novalidate>
                             {{ form.hidden_tag() }}
                             
+                            <!-- Input Type Selection -->
                             <div class="mb-4">
+                                {{ form.input_type.label(class="form-label") }}
+                                <div class="row">
+                                    {% for subfield in form.input_type %}
+                                    <div class="col-md-6">
+                                        <div class="form-check form-check-lg">
+                                            {{ subfield(class="form-check-input") }}
+                                            {{ subfield.label(class="form-check-label") }}
+                                        </div>
+                                    </div>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                            
+                            <!-- URL Input -->
+                            <div class="mb-4" id="url-input">
                                 {{ form.url.label(class="form-label") }}
-                                {{ form.url(class="form-control form-control-lg", placeholder="https://webtv.un.org/en/asset/...", autocomplete="off") }}
+                                {{ form.url(class="form-control form-control-lg", placeholder="https://webtv.un.org/en/asset/... or other video platforms", autocomplete="off") }}
                                 {% if form.url.errors %}
                                     <div class="invalid-feedback d-block">
                                         {% for error in form.url.errors %}{{ error }}{% endfor %}
                                     </div>
                                 {% endif %}
                                 <div class="form-text">{{ form.url.description }}</div>
+                            </div>
+                            
+                            <!-- File Upload Input -->
+                            <div class="mb-4" id="file-input" style="display: none;">
+                                {{ form.audio_file.label(class="form-label") }}
+                                {{ form.audio_file(class="form-control form-control-lg", accept=".mp3,.wav,.m4a,.ogg") }}
+                                {% if form.audio_file.errors %}
+                                    <div class="invalid-feedback d-block">
+                                        {% for error in form.audio_file.errors %}{{ error }}{% endfor %}
+                                    </div>
+                                {% endif %}
+                                <div class="form-text">{{ form.audio_file.description }}</div>
+                                <div class="mt-2">
+                                    <div id="file-info" class="alert alert-info" style="display: none;">
+                                        <strong>Selected file:</strong> <span id="file-name"></span><br>
+                                        <strong>Size:</strong> <span id="file-size"></span>
+                                    </div>
+                                </div>
                             </div>
                             
                             <div class="mb-4">
@@ -125,6 +162,69 @@ document.querySelectorAll('a[href="#process-form"]').forEach(anchor => {
             block: 'center'
         });
     });
+});
+
+// Input type switching
+document.addEventListener('DOMContentLoaded', function() {
+    const inputTypeRadios = document.querySelectorAll('input[name="input_type"]');
+    const urlInput = document.getElementById('url-input');
+    const fileInput = document.getElementById('file-input');
+    const audioFileField = document.getElementById('audio_file');
+    const fileInfo = document.getElementById('file-info');
+    const fileName = document.getElementById('file-name');
+    const fileSize = document.getElementById('file-size');
+    
+    // Function to toggle input visibility
+    function toggleInputs() {
+        const selectedType = document.querySelector('input[name="input_type"]:checked').value;
+        
+        if (selectedType === 'url') {
+            urlInput.style.display = 'block';
+            fileInput.style.display = 'none';
+            // Clear file input
+            if (audioFileField) audioFileField.value = '';
+            fileInfo.style.display = 'none';
+        } else if (selectedType === 'file') {
+            urlInput.style.display = 'none';
+            fileInput.style.display = 'block';
+            // Clear URL input
+            const urlField = document.getElementById('url');
+            if (urlField) urlField.value = '';
+        }
+    }
+    
+    // Add event listeners to radio buttons
+    inputTypeRadios.forEach(radio => {
+        radio.addEventListener('change', toggleInputs);
+    });
+    
+    // File selection handler
+    if (audioFileField) {
+        audioFileField.addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (file) {
+                fileName.textContent = file.name;
+                fileSize.textContent = formatFileSize(file.size);
+                fileInfo.style.display = 'block';
+                
+                // No file size limit for audio files
+            } else {
+                fileInfo.style.display = 'none';
+            }
+        });
+    }
+    
+    // Format file size
+    function formatFileSize(bytes) {
+        if (bytes === 0) return '0 Bytes';
+        const k = 1024;
+        const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    }
+    
+    // Initialize on page load
+    toggleInputs();
 });
 
 // Form validation

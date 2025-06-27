@@ -105,20 +105,56 @@ def logout():
 @bp.route('/', methods=['GET', 'POST'])
 @login_required
 def index():
-    """Home page with URL submission form"""
+    """Home page with URL submission form and file upload"""
     form = UrlForm()
     
     if form.validate_on_submit():
         try:
-            # Create new meeting record
-            meeting = Meeting(
-                title=form.title.data,
-                source_url=form.url.data,
-                status='queued',
-                created_by_user_id=current_user.id
-            )
-            db.session.add(meeting)
-            db.session.commit()
+            # Handle file upload if file input type is selected
+            if form.input_type.data == 'file' and form.audio_file.data:
+                # Save uploaded file
+                uploaded_file = form.audio_file.data
+                filename = uploaded_file.filename
+                
+                # Create meeting record with file indicator
+                meeting = Meeting(
+                    title=form.title.data,
+                    source_url=f"file_upload://{filename}",  # Special URL format for uploaded files
+                    status='queued',
+                    created_by_user_id=current_user.id
+                )
+                db.session.add(meeting)
+                db.session.commit()
+                
+                # Create uploads directory for this meeting
+                meeting_dir = Path(current_app.config.get('UPLOAD_FOLDER', 'uploads')) / f'meeting_{meeting.id}'
+                meeting_dir.mkdir(parents=True, exist_ok=True)
+                
+                # Save the uploaded file with its original extension
+                file_extension = Path(filename).suffix.lower()
+                if file_extension in ['.mp3', '.wav', '.m4a', '.ogg']:
+                    # Save with original extension first
+                    audio_path = meeting_dir / f'audio{file_extension}'
+                    uploaded_file.save(str(audio_path))
+                    
+                    # Update meeting record to indicate we have an audio file
+                    # The pipeline will handle conversion to MP3 during processing
+                    meeting.audio_path = str(meeting_dir / 'audio.mp3')  # Final expected path
+                    db.session.commit()
+                else:
+                    # Shouldn't happen due to form validation, but just in case
+                    raise ValueError(f"Unsupported file format: {file_extension}")
+                
+            else:
+                # Handle URL input (existing functionality)
+                meeting = Meeting(
+                    title=form.title.data,
+                    source_url=form.url.data,
+                    status='queued',
+                    created_by_user_id=current_user.id
+                )
+                db.session.add(meeting)
+                db.session.commit()
             
             # Start processing in background
             start_processing(meeting)
