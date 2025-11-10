@@ -52,6 +52,11 @@ def create_app():
     app.config['AZURE_OPENAI_API_VERSION'] = os.environ.get('AZURE_OPENAI_API_VERSION', '2024-12-01-preview')
     app.config['AZURE_OPENAI_DEPLOYMENT_NAME'] = os.environ.get('AZURE_OPENAI_DEPLOYMENT_NAME', 'GPT-4')
     
+    # Ollama configuration for local LLM inference (Gemma 3)
+    app.config['OLLAMA_BASE_URL'] = os.environ.get('OLLAMA_BASE_URL', 'http://localhost:11434/v1')
+    app.config['OLLAMA_MODEL'] = os.environ.get('OLLAMA_MODEL', 'gemma2:latest')
+    app.config['OLLAMA_API_KEY'] = os.environ.get('OLLAMA_API_KEY', 'ollama')
+    
     # GPU configuration for Whisper transcription
     app.config['USE_GPU'] = os.environ.get('USE_GPU', 'true')
     

@@ -8,8 +8,22 @@ import os
 import logging
 from app import create_app
 
-# Enable detailed logging
-logging.basicConfig(level=logging.DEBUG)
+# Configure logging based on VERBOSE environment variable
+VERBOSE = os.environ.get('VERBOSE', 'false').lower() == 'true'
+
+if VERBOSE:
+    # Verbose mode: show all debug logs
+    logging.basicConfig(level=logging.DEBUG)
+else:
+    # Normal mode: only show warnings and errors
+    logging.basicConfig(level=logging.WARNING)
+    
+    # Suppress debug/info logs from noisy libraries
+    logging.getLogger('urllib3').setLevel(logging.WARNING)
+    logging.getLogger('openai').setLevel(logging.WARNING)
+    logging.getLogger('httpcore').setLevel(logging.WARNING)
+    logging.getLogger('httpx').setLevel(logging.WARNING)
+    logging.getLogger('werkzeug').setLevel(logging.WARNING)
 
 app = create_app()
 

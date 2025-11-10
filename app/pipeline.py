@@ -5,6 +5,7 @@ Based on the comprehensive standalone script with improvements for:
 - Enhanced audio format selection (prioritizing English)
 - **NEW: Integrated SRT to JSON conversion and Gemini speaker diarization**
 - **NEW: Advanced speaker organization with database integration**
+- **NEW: Clean progress logging for minimal terminal output**
 """
 import os
 import re
@@ -12,12 +13,24 @@ import json
 import time
 import requests
 import subprocess
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from datetime import timedelta
 import threading
 import random
 import math
+
+# Import progress logger for clean output
+from app.progress import get_logger, reset_logger
+
+# Get verbose setting from environment (default: False for clean output)
+VERBOSE = os.environ.get('VERBOSE', 'false').lower() == 'true'
+
+# Suppress verbose OpenAI library logging
+logging.getLogger("openai").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 # Optional imports for AI functionality
 try:
@@ -72,11 +85,18 @@ MAX_DELAY = 60  # Maximum delay in seconds
 
 # Azure OpenAI Enhanced Speaker Identification Configuration
 # This provides better accuracy for speaker identification in long meetings
-MAX_SEGMENTS_PER_GPT_BATCH = 50  # GPT-4 can handle larger batches
+# Reduced batch size to avoid rate limits (15k TPM limit on Azure)
+MAX_SEGMENTS_PER_GPT_BATCH = 200  # Reduced from 600 to stay within token limits
 BATCH_OVERLAP_SIZE = 5  # Overlapping segments for better context continuity
 DEFAULT_AZURE_ENDPOINT = "https://z-openai-openai4tsb-dev-chn.openai.azure.com/"
 DEFAULT_DEPLOYMENT_NAME = "GPT-4"
 DEFAULT_API_VERSION = "2024-12-01-preview"
+
+# Ollama Local LLM Configuration (Gemma 3)
+# Provides local inference with no API costs or rate limits
+OLLAMA_AVAILABLE = True  # Ollama is local, always available if installed
+DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434/v1"
+DEFAULT_OLLAMA_MODEL = "gemma3:12b"  # or "gemma3:latest" when available
 
 # Enhanced Gemini prompt for better speaker separation
 GEMINI_PROMPT_FOR_CONTEXT = '''
@@ -133,6 +153,63 @@ def setup_gemini_api():
 
 
 # ============================================================================
+# OLLAMA LOCAL LLM CONFIGURATION (GEMMA 3)
+# ============================================================================
+
+def get_ollama_config():
+    """Get Ollama configuration from Flask app or environment"""
+    config = {}
+    try:
+        from flask import current_app
+        config['base_url'] = current_app.config.get('OLLAMA_BASE_URL', DEFAULT_OLLAMA_BASE_URL)
+        config['model'] = current_app.config.get('OLLAMA_MODEL', DEFAULT_OLLAMA_MODEL)
+        config['api_key'] = current_app.config.get('OLLAMA_API_KEY', 'ollama')  # Ollama doesn't need real key
+    except RuntimeError:
+        config['base_url'] = os.environ.get('OLLAMA_BASE_URL', DEFAULT_OLLAMA_BASE_URL)
+        config['model'] = os.environ.get('OLLAMA_MODEL', DEFAULT_OLLAMA_MODEL)
+        config['api_key'] = os.environ.get('OLLAMA_API_KEY', 'ollama')
+    
+    return config
+
+
+def setup_ollama_client():
+    """Initialize Ollama client using OpenAI-compatible API"""
+    if not AZURE_OPENAI_AVAILABLE:
+        print("⚠️ OpenAI library not available for Ollama")
+        return None
+    
+    config = get_ollama_config()
+    
+    try:
+        # Test if Ollama is running by making a simple request
+        test_url = config['base_url'].replace('/v1', '') + '/api/tags'
+        response = requests.get(test_url, timeout=2)
+        
+        if response.status_code != 200:
+            print("⚠️ Ollama server not responding")
+            return None
+        
+        # Create OpenAI client pointing to Ollama
+        from openai import OpenAI
+        client = OpenAI(
+            base_url=config['base_url'],
+            api_key=config['api_key']  # Ollama doesn't validate this
+        )
+        
+        print(f"✓ Connected to Ollama at {config['base_url']}")
+        print(f"✓ Using model: {config['model']}")
+        
+        return client, config['model']
+    
+    except requests.exceptions.ConnectionError:
+        print("⚠️ Ollama server not running. Start it with: ollama serve")
+        return None
+    except Exception as e:
+        print(f"⚠️ Error connecting to Ollama: {e}")
+        return None
+
+
+# ============================================================================
 # ENHANCED SPEAKER IDENTIFICATION WITH AZURE OPENAI (GPT-4)
 # ============================================================================
 
@@ -180,129 +257,560 @@ def setup_azure_openai_client():
 
 def extract_speaker_info_with_gpt(transcript_text):
     """
-    Multi-pass speaker extraction using GPT-4 for better accuracy.
+    Multi-pass speaker extraction with Azure OpenAI GPT-4 as primary,
+    Ollama (Gemma 3) as fallback.
     
     Pass 1: Extract all speaker mentions and introductions
     Pass 2: Build comprehensive speaker profiles with validation
+    
+    Returns: (speaker_info, total_tokens_used)
     """
-    print("\n🔍 Enhanced Speaker Extraction with GPT-4 (Multi-Pass)")
+    print("\n🔍 Speaker Extraction (Multi-Pass)")
     
+    # Try Azure OpenAI GPT-4 first
     client_info = setup_azure_openai_client()
-    if not client_info:
-        print("Azure OpenAI not configured, falling back to Gemini...")
-        return None
+    if client_info:
+        client, deployment = client_info
+        provider = "Azure GPT-4"
+    else:
+        # Fallback to Ollama
+        client_info = setup_ollama_client()
+        if not client_info:
+            print("  ✗ No AI service available")
+            return None, 0
+        client, deployment = client_info
+        provider = "Ollama"
     
-    client, deployment = client_info
+    # Track total tokens
+    total_tokens_used = 0
     
     # Pass 1: Extract speaker mentions
-    print("  Pass 1: Extracting all speaker mentions...")
-    pass1_prompt = f"""You are an expert in analyzing meeting transcripts.
+    print(f"  Pass 1: Mentions ({provider})")
+    pass1_prompt = f"""You are an expert in analyzing international meeting transcripts with focus on diplomatic and organizational contexts.
 
-Analyze this transcript and extract ALL mentions of speakers, including:
-1. Direct introductions ("My name is...", "I am...", "This is...")
-2. References to speakers ("As mentioned by...", "Thank you...")
-3. Third-party introductions ("Please welcome...", "Next we have...")
-4. Self-identifications with context
+TASK: Extract ALL speaker mentions with maximum detail about their identity and affiliation.
+
+EXTRACTION PRIORITY (in order):
+1. **FULL NAME** - Complete name with titles (Dr., Hon., H.E., etc.)
+2. **COUNTRY/ORGANIZATION** - Which country or organization do they represent?
+3. **CONTEXT** - The exact sentence where mentioned
+
+LOOK FOR THESE PATTERNS:
+
+**Self-Introductions:**
+- "My name is [Name]"
+- "I am [Name] from [Country/Org]"
+- "This is [Name] speaking"
+- "[Name] here, representing [Country/Org]"
+
+**Third-Party Introductions:**
+- "Please welcome [Name] from [Country/Org]"
+- "Next we have [Name], [Title] of [Org]"
+- "I'd like to introduce [Name] representing [Country]"
+- "Joining us is [Name] from the [Org]"
+
+**Position Identifiers:**
+- "Minister [Name]"
+- "Ambassador [Name]"
+- "[Name], Director of [Org]"
+- "Representative of [Country], [Name]"
+
+**References:**
+- "Thank you, [Name]"
+- "As [Name] mentioned"
+- "[Name] from [Country/Org] raised"
+
+**Country/Organization Indicators:**
+Priority organizations: UN, WHO, World Bank, ITU, UNESCO, EU, African Union, ASEAN
+Priority country formats: "Dominican Republic", "United States", "People's Republic of China"
 
 Return a JSON object with this structure:
 {{
     "speaker_mentions": [
         {{
-            "name": "Full name or identifier",
-            "context": "The sentence/phrase where they were mentioned",
-            "mention_type": "introduction|reference|self-identification"
+            "name": "Full name with any titles (e.g., 'Dr. Maria Rodriguez', 'Hon. John Smith')",
+            "country": "Country they represent (if mentioned, otherwise null)",
+            "organization": "Organization/Ministry they represent (if mentioned, otherwise null)",
+            "context": "The complete sentence or phrase where they were mentioned",
+            "mention_type": "self-introduction|third-party-introduction|reference|position-identifier",
+            "confidence": "high|medium|low"
         }}
     ]
 }}
 
-Transcript (first 5000 characters):
-{transcript_text[:5000]}
+CRITICAL RULES:
+1. Extract COMPLETE names - don't truncate titles or honorifics
+2. Capture BOTH country AND organization if mentioned (e.g., "Minister from Dominican Republic")
+3. For UN officials, extract their specific office/agency
+4. If unsure about country/org, set to null (don't guess)
+5. Mark confidence: high (explicit mention), medium (implied), low (unclear)
+6. Include ALL mentions, even if same person appears multiple times
 
-Return ONLY the JSON object."""
+Transcript (strategic samples focusing on introductions):
+{extract_intro_sections(transcript_text, max_chars=50000)}
+
+Return ONLY the JSON object. Be thorough - we need complete speaker information for accurate diarization."""
 
     try:
+        start_time = time.time()
+        
         response1 = client.chat.completions.create(
             model=deployment,
             messages=[{"role": "user", "content": pass1_prompt}],
             temperature=0.1,
             top_p=1.0,
-            max_tokens=2000
+            max_tokens=10000
         )
         
-        mentions_text = response1.choices[0].message.content.strip()
-        if mentions_text.startswith("```json"):
-            mentions_text = mentions_text[7:]
-        if mentions_text.endswith("```"):
-            mentions_text = mentions_text[:-3]
+        elapsed = time.time() - start_time
         
-        speaker_mentions = json.loads(mentions_text.strip())
-        print(f"  ✓ Found {len(speaker_mentions.get('speaker_mentions', []))} speaker mentions")
+        # Track tokens
+        if hasattr(response1, 'usage') and response1.usage:
+            total_tokens_used += response1.usage.total_tokens
+            print(f"     {elapsed:.1f}s | {response1.usage.prompt_tokens:,}→{response1.usage.completion_tokens:,} tokens")
+        else:
+            print(f"     {elapsed:.1f}s")
+        
+        mentions_text = response1.choices[0].message.content.strip()
+        
+        # Robust JSON extraction
+        if "```json" in mentions_text:
+            mentions_text = mentions_text.split("```json")[1].split("```")[0]
+        elif "```" in mentions_text:
+            mentions_text = mentions_text.split("```")[1].split("```")[0]
+        
+        mentions_text = mentions_text.strip()
+        
+        # Try to find JSON object if there's extra text
+        if not mentions_text.startswith('{'):
+            start = mentions_text.find('{')
+            if start != -1:
+                mentions_text = mentions_text[start:]
+        if not mentions_text.endswith('}'):
+            end = mentions_text.rfind('}')
+            if end != -1:
+                mentions_text = mentions_text[:end+1]
+        
+        speaker_mentions = json.loads(mentions_text)
+        print(f"     Found {len(speaker_mentions.get('speaker_mentions', []))} mentions")
         
     except Exception as e:
         print(f"  ✗ Pass 1 failed: {e}")
-        return None
+        return None, 0
     
     # Pass 2: Build comprehensive speaker profiles
-    print("  Pass 2: Building speaker profiles with validation...")
-    pass2_prompt = f"""Based on these speaker mentions, create comprehensive speaker profiles.
+    print(f"  Pass 2: Profiles ({provider})")
+    pass2_prompt = f"""You are an expert in building comprehensive speaker profiles for international meetings, with deep knowledge of diplomatic protocols and organizational structures.
 
-Speaker Mentions:
-{json.dumps(speaker_mentions, indent=2)}
+TASK: Create validated, deduplicated speaker profiles with complete organizational context.
 
-Full Transcript (for context):
-{transcript_text[:8000]}
+INPUT DATA:
+Speaker Mentions from Pass 1 (compressed):
+{json.dumps(compress_speaker_mentions(speaker_mentions), separators=(',', ':'))}
 
-Create a JSON object with this structure:
+Relevant Transcript Sections (for validation):
+{extract_speaker_relevant_sections(transcript_text, speaker_mentions, max_chars=80000)}
+
+PROFILE BUILDING RULES:
+
+**Name Standardization:**
+1. Merge variations: "Dr. Smith", "Smith", "Doctor Smith" → "Dr. Smith"
+2. Keep highest formality: "H.E. Ambassador Chen" over "Ambassador Chen"
+3. Preserve all titles: "Dr.", "Prof.", "Hon.", "H.E.", "Minister", etc.
+4. Full name when available: "Maria Rodriguez" not just "Rodriguez"
+
+**Country/Organization Priority:**
+1. COUNTRY: Exact country name (use official forms: "Dominican Republic" not "DR")
+2. MINISTRY/DEPARTMENT: Full name (e.g., "Ministry of Digital Development")
+3. ORGANIZATION: Complete name with acronym if applicable (e.g., "International Telecommunication Union (ITU)")
+4. MULTILATERAL: For UN officials, specify agency (WHO, UNESCO, UNDP, etc.)
+5. PRIVATE SECTOR: Company/organization name
+
+**Position/Title Extraction:**
+- Extract full titles: "Minister of Digital Transformation"
+- Include seniority: "Deputy Minister", "Assistant Secretary"
+- Diplomatic ranks: "Ambassador", "Permanent Representative"
+- UN positions: "Under-Secretary-General", "Special Envoy"
+- Corporate: "CEO", "Director-General", "Vice President"
+
+**Country Representation Analysis:**
+- Government officials → Country name
+- UN agency staff → "International" or their headquarters country
+- NGOs/Private sector → Organization name (not country)
+- Regional bodies → Region + organization (e.g., "African Union")
+
+Create a JSON object:
 {{
     "speakers": [
         {{
-            "name": "Full name (standardized)",
-            "title": "Their position/role",
-            "organization": "Organization/Country they represent",
-            "country": "Country if applicable",
-            "description": "Key identifying information"
+            "name": "Full standardized name with titles",
+            "title": "Complete official title/position",
+            "organization": "Full organization name (use official names, include acronyms)",
+            "country": "Country represented (use official country names, or 'International' for multilateral)",
+            "affiliation_type": "government|international_organization|private_sector|ngo|academic|regional_body",
+            "description": "2-3 sentence description: their role, what they discussed, key expertise",
+            "alternative_names": ["List", "of", "name", "variations", "found"],
+            "confidence_score": "high|medium|low"
         }}
     ]
 }}
 
-Rules:
-1. Standardize names (e.g., "Dr. Smith" and "Smith" → "Dr. Smith")
-2. Merge duplicate entries for the same person
-3. Only include speakers clearly identified in the transcript
-4. Prioritize speakers with explicit introductions
+VALIDATION CHECKLIST:
+✓ Merge all variations of same person (check name similarity)
+✓ Every profile has at least: name + (organization OR country)
+✓ Titles are complete (not truncated)
+✓ Organizations use official names
+✓ Countries use official names (not abbreviations unless standard like "USA")
+✓ Mark confidence low if information is unclear
+✓ Include only speakers with clear identification (no generic "Participant 1")
+✓ Prioritize speakers who spoke substantively (not just brief remarks)
 
-Return ONLY the JSON object."""
+COUNTRY/ORG EXAMPLES:
+Good: "Dominican Republic", "World Health Organization (WHO)", "Ministry of Communications"
+Bad: "DR", "WHO" (without full name), "Communications Ministry"
+
+Return ONLY the JSON object. Focus on accuracy over quantity - we need reliable speaker identification."""
 
     try:
+        start_time = time.time()
+        
         response2 = client.chat.completions.create(
             model=deployment,
             messages=[{"role": "user", "content": pass2_prompt}],
             temperature=0.1,
             top_p=1.0,
-            max_tokens=3000
+            max_tokens=15000
         )
         
+        elapsed = time.time() - start_time
+        
+        # Track tokens
+        if hasattr(response2, 'usage') and response2.usage:
+            total_tokens_used += response2.usage.total_tokens
+            print(f"     {elapsed:.1f}s | {response2.usage.prompt_tokens:,}→{response2.usage.completion_tokens:,} tokens")
+        else:
+            print(f"     {elapsed:.1f}s")
+        
         profiles_text = response2.choices[0].message.content.strip()
-        if profiles_text.startswith("```json"):
-            profiles_text = profiles_text[7:]
-        if profiles_text.endswith("```"):
-            profiles_text = profiles_text[:-3]
         
-        speaker_info = json.loads(profiles_text.strip())
+        # Robust JSON extraction
+        if "```json" in profiles_text:
+            profiles_text = profiles_text.split("```json")[1].split("```")[0]
+        elif "```" in profiles_text:
+            profiles_text = profiles_text.split("```")[1].split("```")[0]
         
-        print(f"  ✓ Created profiles for {len(speaker_info.get('speakers', []))} speakers:")
-        for speaker in speaker_info.get('speakers', [])[:5]:  # Show first 5
-            print(f"    • {speaker.get('name', 'Unknown')}: {speaker.get('title', '')} at {speaker.get('organization', '')}")
+        profiles_text = profiles_text.strip()
         
-        if len(speaker_info.get('speakers', [])) > 5:
-            print(f"    ... and {len(speaker_info['speakers']) - 5} more")
+        # Try to find JSON object if there's extra text
+        if not profiles_text.startswith('{'):
+            start = profiles_text.find('{')
+            if start != -1:
+                profiles_text = profiles_text[start:]
+        if not profiles_text.endswith('}'):
+            end = profiles_text.rfind('}')
+            if end != -1:
+                profiles_text = profiles_text[:end+1]
         
-        return speaker_info
+        speaker_info = json.loads(profiles_text)
+        
+        num_speakers = len(speaker_info.get('speakers', []))
+        print(f"     Created {num_speakers} speaker profiles")
+        
+        # Only show details in verbose mode
+        if VERBOSE and num_speakers > 0:
+            for speaker in speaker_info.get('speakers', [])[:3]:
+                print(f"       • {speaker.get('name', 'Unknown')}")
+            if num_speakers > 3:
+                print(f"       ... and {num_speakers - 3} more")
+        
+        print(f"  📊 Total extraction tokens: {total_tokens_used:,}")
+        return speaker_info, total_tokens_used
         
     except Exception as e:
         print(f"  ✗ Pass 2 failed: {e}")
-        return None
+        return None, total_tokens_used
 
+
+# ============================================================================
+# TOKEN OPTIMIZATION FUNCTIONS
+# ============================================================================
+
+def compress_batch_for_llm(batch_data):
+    """
+    Compress batch to minimal format: [[index, text], ...]
+    ~10-15 tokens per segment (vs 80-100 currently)
+    """
+    compressed = []
+    for seg in batch_data:
+        # Escape newlines in text (JSON will handle other special chars)
+        text = seg.get('text', '').replace('\n', '\\n')
+        compressed.append([seg.get('index', 0), text])
+    return compressed
+
+def format_compressed_batch(compressed_data):
+    """
+    Format for LLM: Use compact JSON array notation
+    Example: [[360,"principles."],[361,"Two, bolster"]]
+    """
+    return json.dumps(compressed_data, separators=(',', ':'), ensure_ascii=False)
+
+def decompress_batch_response(response_text, original_batch):
+    """
+    Parse LLM response and map back to full structure
+    Handles both compressed format [[index, speaker], ...] and full JSON fallback
+    """
+    try:
+        # Clean response text
+        result_text = response_text.strip()
+        
+        # Remove markdown code blocks if present
+        if "```json" in result_text:
+            result_text = result_text.split("```json")[1].split("```")[0]
+        elif "```" in result_text:
+            result_text = result_text.split("```")[1].split("```")[0]
+        
+        result_text = result_text.strip()
+        
+        # Try to find JSON array if there's extra text
+        if not result_text.startswith('['):
+            start = result_text.find('[')
+            if start != -1:
+                result_text = result_text[start:]
+        if not result_text.endswith(']'):
+            end = result_text.rfind(']')
+            if end != -1:
+                result_text = result_text[:end+1]
+        
+        parsed = json.loads(result_text)
+        
+        # Check if it's compressed format [[idx, speaker], ...]
+        if isinstance(parsed, list) and len(parsed) > 0:
+            if isinstance(parsed[0], list) and len(parsed[0]) == 2:
+                # Compressed format: [[index, speaker], ...]
+                filled_batch = original_batch.copy()
+                speaker_map = {}
+                for item in parsed:
+                    if isinstance(item, list) and len(item) == 2:
+                        try:
+                            idx = int(item[0])
+                            speaker = str(item[1]).strip()
+                            speaker_map[idx] = speaker
+                        except (ValueError, IndexError):
+                            continue
+                
+                # Map speakers back to segments
+                for seg in filled_batch:
+                    seg_idx = seg.get('index', 0)
+                    if seg_idx in speaker_map:
+                        seg['speaker'] = speaker_map[seg_idx]
+                
+                return filled_batch
+            
+            # Fallback: Try full JSON format [{"index":..., "speaker":...}, ...]
+            if isinstance(parsed[0], dict) and 'index' in parsed[0]:
+                return parsed
+                
+    except (json.JSONDecodeError, ValueError, KeyError) as e:
+        print(f"  ⚠ Decompression error: {e}, trying fallback parsing...")
+    
+    # If all parsing fails, return original with empty speakers
+    return original_batch
+
+def extract_intro_sections(transcript_text, max_chars=50000):
+    """
+    Extract sections most likely to contain speaker introductions:
+    1. First 15k chars (opening/introductions)
+    2. Sections with intro patterns
+    3. Random samples from middle/end
+    """
+    intro_patterns = [
+        r'(?:my name is|i am|this is|representing|from)',
+        r'(?:please welcome|introducing|joining us)',
+        r'(?:minister|ambassador|director|representative)',
+    ]
+    
+    sections = []
+    
+    # Always include beginning (where most intros happen)
+    sections.append(('beginning', transcript_text[:15000]))
+    
+    # Find sections with intro patterns
+    for pattern in intro_patterns:
+        matches = list(re.finditer(pattern, transcript_text, re.IGNORECASE))
+        for match in matches[:5]:  # Top 5 matches per pattern
+            start = max(0, match.start() - 500)
+            end = min(len(transcript_text), match.end() + 2000)
+            sections.append((f'intro_{match.start()}', transcript_text[start:end]))
+    
+    # Add random samples if still under limit
+    total_len = len(transcript_text)
+    if total_len > 30000:
+        for _ in range(3):
+            start = random.randint(15000, total_len - 5000)
+            sections.append((f'sample_{start}', transcript_text[start:start+5000]))
+    
+    # Combine and deduplicate (keep first occurrence of overlapping sections)
+    combined_sections = []
+    seen_positions = set()
+    
+    for name, text in sections:
+        # Simple deduplication: check if we've seen similar content
+        text_hash = hash(text[:100])  # Hash first 100 chars
+        if text_hash not in seen_positions:
+            seen_positions.add(text_hash)
+            combined_sections.append(text)
+    
+    combined = "\n\n[...]\n\n".join(combined_sections)
+    return combined[:max_chars]
+
+def compress_speaker_mentions(speaker_mentions):
+    """
+    Extract only essential fields: name, country, org, context
+    Remove: mention_type, confidence (not needed for Pass 2)
+    """
+    compressed = []
+    for mention in speaker_mentions.get('speaker_mentions', []):
+        compressed.append({
+            'n': mention.get('name', ''),  # 'n' instead of 'name'
+            'c': mention.get('country'),   # 'c' instead of 'country'
+            'o': mention.get('organization'), # 'o' instead of 'organization'
+            'ctx': mention.get('context', '')[:200]  # 'ctx' instead of 'context', truncated
+        })
+    return {'m': compressed}  # 'm' instead of 'speaker_mentions'
+
+def extract_speaker_relevant_sections(transcript_text, speaker_mentions=None, max_chars=80000):
+    """
+    For Pass 2: Extract only sections where identified speakers appear
+    """
+    if not speaker_mentions:
+        # Fallback to intro extraction
+        return extract_intro_sections(transcript_text, max_chars)
+    
+    # Build search patterns from identified speakers
+    names = [m.get('name', '') for m in speaker_mentions.get('speaker_mentions', []) if m.get('name')]
+    countries = [m.get('country', '') for m in speaker_mentions.get('speaker_mentions', []) if m.get('country')]
+    orgs = [m.get('organization', '') for m in speaker_mentions.get('speaker_mentions', []) if m.get('organization')]
+    
+    # Find all sections mentioning these entities
+    relevant_sections = []
+    seen_positions = set()
+    
+    # Search for each name/country/org (limit to avoid too many matches)
+    search_terms = names[:10] + countries[:5] + orgs[:5]
+    
+    for term in search_terms:
+        if not term or len(term) < 3:
+            continue
+        
+        # Use word boundaries to avoid partial matches
+        try:
+            pattern = r'\b' + re.escape(term) + r'\b'
+            matches = list(re.finditer(pattern, transcript_text, re.IGNORECASE))
+            
+            for match in matches[:3]:  # Top 3 matches per term
+                pos = match.start()
+                # Avoid overlapping sections
+                if any(abs(pos - seen) < 1000 for seen in seen_positions):
+                    continue
+                
+                seen_positions.add(pos)
+                start = max(0, pos - 1000)  # 1k chars before
+                end = min(len(transcript_text), pos + 3000)  # 3k chars after
+                relevant_sections.append((start, transcript_text[start:end]))
+        except re.error:
+            continue
+    
+    # Sort by position and combine
+    relevant_sections.sort(key=lambda x: x[0])
+    
+    # Combine sections with markers
+    combined = "\n\n[... section break ...]\n\n".join([s[1] for s in relevant_sections])
+    
+    # Always include beginning (opening remarks)
+    beginning = transcript_text[:10000]
+    if beginning not in combined:
+        combined = beginning + "\n\n[...]\n\n" + combined
+    
+    return combined[:max_chars]
+
+def create_speaker_lookup_table(speaker_info):
+    """
+    Create compact lookup: ID -> essential info
+    Returns: (lookup_dict, reverse_lookup_dict)
+    """
+    if not speaker_info or not speaker_info.get('speakers'):
+        return {}, {}
+    
+    lookup = {}
+    reverse_lookup = {}  # name -> ID
+    
+    for idx, speaker in enumerate(speaker_info.get('speakers', []), 1):
+        name = speaker.get('name', '')
+        org = speaker.get('organization', '')
+        country = speaker.get('country', '')
+        
+        # Compact format: Name|Org|Country (empty if missing)
+        compact = f"{name}|{org}|{country}"
+        lookup[idx] = compact
+        if name:
+            reverse_lookup[name.lower()] = idx
+    
+    return lookup, reverse_lookup
+
+def create_compact_speaker_context(speaker_lookup):
+    """
+    Ultra-compact format: "SPK:1|Name|Org|Country;2|Name2|Org2|Country2"
+    ~5 tokens per speaker vs ~50 currently
+    """
+    if not speaker_lookup:
+        return ""
+    
+    entries = [f"{k}|{v}" for k, v in speaker_lookup.items()]
+    return "SPK:" + ";".join(entries) + "\n"
+
+def filter_active_speakers(previous_segments, speaker_lookup, reverse_lookup, window=50):
+    """
+    Only include speakers who appeared in recent segments
+    Reduces context from all speakers to just active ones
+    """
+    if not previous_segments or not speaker_lookup:
+        return ""
+    
+    # Get speakers from last N segments
+    recent_speakers = set()
+    for seg in previous_segments[-window:]:
+        speaker_name = seg.get('speaker', '').strip()
+        if speaker_name:
+            # Try to find ID
+            speaker_lower = speaker_name.lower()
+            if speaker_lower in reverse_lookup:
+                recent_speakers.add(reverse_lookup[speaker_lower])
+    
+    if not recent_speakers:
+        return ""
+    
+    # Only include active speakers
+    active_lookup = {k: v for k, v in speaker_lookup.items() if k in recent_speakers}
+    return create_compact_speaker_context(active_lookup)
+
+def create_compact_previous_context(all_filled_segments, window=30):
+    """
+    Minimal previous context: just speaker names from recent segments
+    Format: "RECENT:Speaker1,Speaker2" (speakers seen recently)
+    """
+    if not all_filled_segments:
+        return ""
+    
+    recent_speakers = set()
+    for seg in all_filled_segments[-window:]:
+        speaker = seg.get('speaker', '').strip()
+        if speaker:
+            recent_speakers.add(speaker)
+    
+    if not recent_speakers:
+        return ""
+    
+    return f"RECENT:{','.join(sorted(recent_speakers))}\n"
 
 def detect_speaker_boundaries(segments, global_context):
     """
@@ -352,110 +860,194 @@ def detect_speaker_boundaries(segments, global_context):
 
 def fill_speakers_in_batch_gpt(batch_data, batch_number, total_batches, global_speaker_context, previous_speaker_context):
     """
-    Enhanced batch processing with GPT-4 for better accuracy.
-    Includes validation and automatic recovery from errors.
+    Enhanced batch processing with Azure OpenAI GPT-4 as primary,
+    Ollama (Gemma 3) as fallback.
+    Includes validation, automatic recovery, and token tracking.
+    
+    Returns: (filled_data, tokens_used)
     """
-    print(f"\n📝 Processing batch {batch_number}/{total_batches} with GPT-4 ({len(batch_data)} segments)...")
+    print(f"\n📝 Batch {batch_number}/{total_batches} ({len(batch_data)} segments)")
     
+    # Try Azure OpenAI GPT-4 first
     client_info = setup_azure_openai_client()
-    if not client_info:
-        print("  Azure OpenAI not available, falling back to Gemini...")
-        return None
+    if client_info:
+        client, deployment = client_info
+        provider = "Azure GPT-4"
+    else:
+        # Fallback to Ollama
+        client_info = setup_ollama_client()
+        if not client_info:
+            print("  ✗ No AI service available")
+            return None, 0
+        client, deployment = client_info
+        provider = "Ollama"
     
-    client, deployment = client_info
+    # Compress batch to minimal format
+    compressed_batch = compress_batch_for_llm(batch_data)
+    batch_string = format_compressed_batch(compressed_batch)
     
-    batch_string = json.dumps(batch_data, indent=2)
-    
-    prompt = f"""You are an expert in speaker diarization for meeting transcripts.
-
-Analyze this transcript batch (part {batch_number} of {total_batches}) and identify speakers for each segment.
+    prompt = f"""Diarize batch {batch_number}/{total_batches}.
 
 {global_speaker_context}
 
 {previous_speaker_context}
 
-CRITICAL RULES:
-1. Use EXACT names from "KNOWN SPEAKERS" when you recognize them
-2. Maintain consistency with previous batches
-3. Use clear labels for unknown speakers (e.g., "Participant 1", "Moderator")
-4. Fill the "speaker" field for EVERY segment
-5. Return the COMPLETE JSON array with ALL segments
+Format: [[index,text],...]
+Return: [[index,speaker],...] (one array per segment)
 
-Input Batch:
-```json
+Input:
 {batch_string}
-```
 
-Return ONLY the filled JSON array, starting with [ and ending with ].
-Ensure every segment has a speaker assigned."""
+Rules: Use exact names from SPK when recognized. Fill speaker for every segment."""
 
+    # Estimate input tokens
+    input_tokens = len(prompt.split()) * 1.3  # Rough estimate
+    
     for attempt in range(MAX_RETRIES):
         try:
-            print(f"  Attempt {attempt + 1}/{MAX_RETRIES}...")
+            # Track timing
+            start_time = time.time()
             
             response = client.chat.completions.create(
                 model=deployment,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
                 top_p=1.0,
-                max_tokens=8000
+                max_tokens=16384  # GPT-4 max output tokens limit
             )
+            
+            elapsed = time.time() - start_time
+            
+            # Extract token usage if available
+            tokens_used = 0
+            if hasattr(response, 'usage') and response.usage:
+                prompt_tokens = response.usage.prompt_tokens
+                completion_tokens = response.usage.completion_tokens
+                total_tokens = response.usage.total_tokens
+                tokens_used = total_tokens
+                print(f"  ✓ {provider} | {elapsed:.1f}s | Tokens: {prompt_tokens:,}→{completion_tokens:,} (Total: {total_tokens:,})")
+            else:
+                print(f"  ✓ {provider} | {elapsed:.1f}s | Tokens: ~{int(input_tokens):,} (estimated)")
             
             result_text = response.choices[0].message.content.strip()
             
-            # Clean JSON markers
-            if result_text.startswith("```json"):
-                result_text = result_text[7:]
-            if result_text.endswith("```"):
-                result_text = result_text[:-3]
+            # Robust JSON extraction
+            if "```json" in result_text:
+                result_text = result_text.split("```json")[1].split("```")[0]
+            elif "```" in result_text:
+                result_text = result_text.split("```")[1].split("```")[0]
             
             result_text = result_text.strip()
             
-            # Validate JSON structure
+            # Try to find JSON array if there's extra text
+            if not result_text.startswith('['):
+                start = result_text.find('[')
+                if start != -1:
+                    result_text = result_text[start:]
             if not result_text.endswith(']'):
-                raise ValueError("Incomplete JSON response")
+                end = result_text.rfind(']')
+                if end != -1:
+                    result_text = result_text[:end+1]
             
-            filled_data = json.loads(result_text)
+            # Use decompression function to handle both formats
+            filled_data = decompress_batch_response(result_text, batch_data)
             
             # Validate segment count
             if len(filled_data) != len(batch_data):
-                print(f"  ⚠ Warning: Expected {len(batch_data)} segments, got {len(filled_data)}")
+                print(f"  ⚠ Segment mismatch: {len(filled_data)}/{len(batch_data)}")
                 raise ValueError(f"Segment count mismatch")
             
             # Validate all speakers are filled
             empty_count = sum(1 for seg in filled_data if not seg.get('speaker', '').strip())
             if empty_count > 0:
-                print(f"  ⚠ Warning: {empty_count} segments have empty speakers")
+                print(f"  ⚠ {empty_count} segments missing speakers")
             
-            print(f"  ✓ Successfully processed batch {batch_number}/{total_batches}")
-            return filled_data
+            return filled_data, tokens_used
             
         except Exception as e:
-            print(f"  ✗ Attempt {attempt + 1} failed: {e}")
+            error_str = str(e)
+            error_type = type(e).__name__
+            print(f"  ✗ Attempt {attempt + 1} failed: {error_str}")
+            
+            # Check for 429 rate limit error (OpenAI library wraps it)
+            is_rate_limit = False
+            retry_after = None
+            
+            # Check error string for rate limit indicators
+            if "429" in error_str or "Too Many Requests" in error_str or "rate limit" in error_str.lower():
+                is_rate_limit = True
+                
+                # Try to extract Retry-After from response headers
+                if hasattr(e, 'response') and e.response is not None:
+                    try:
+                        headers = getattr(e.response, 'headers', {})
+                        if isinstance(headers, dict):
+                            retry_after_str = headers.get('Retry-After') or headers.get('retry-after') or headers.get('x-ratelimit-reset-tokens')
+                            if retry_after_str:
+                                try:
+                                    retry_after = int(retry_after_str)
+                                    retry_after = min(retry_after + 2, MAX_DELAY)  # Add 2s buffer, cap at MAX_DELAY
+                                except (ValueError, TypeError):
+                                    pass
+                    except Exception:
+                        pass
+            
+            # Handle rate limit errors with proper retry delay
+            if is_rate_limit:
+                if retry_after:
+                    delay = retry_after
+                    print(f"  ⚠ Rate limit hit. Waiting {delay}s (as per Retry-After header)...")
+                else:
+                    # Default delay for rate limits: longer than normal retries
+                    delay = min(30 + (attempt * 10), MAX_DELAY)  # 30s, 40s, 50s...
+                    print(f"  ⚠ Rate limit hit. Waiting {delay}s before retry...")
+                
+                if attempt < MAX_RETRIES - 1:
+                    time.sleep(delay)
+                    continue
+                else:
+                    print(f"  ✗ Rate limit exceeded after {MAX_RETRIES} attempts.")
+                    print(f"  💡 Suggestion: Reduce batch size or wait before processing next batch.")
+                    return None, 0
+            
+            # For other errors, use standard exponential backoff
             if attempt < MAX_RETRIES - 1:
                 delay = min(BASE_DELAY * (2 ** attempt), MAX_DELAY)
                 print(f"  Retrying in {delay:.1f}s...")
                 time.sleep(delay)
     
     print(f"  ✗ All attempts failed for batch {batch_number}")
-    return None
+    return None, 0
 
 
-def fill_speakers_with_gpt_enhanced(transcript_data, global_speaker_context):
+def fill_speakers_with_gpt_enhanced(transcript_data, global_speaker_context, speaker_info=None):
     """
     Enhanced speaker filling using GPT-4 with overlapping batches.
     Provides better context continuity and speaker consistency.
+    Now optimized with compressed formats and lookup tables.
+    
+    Args:
+        transcript_data: List of transcript segments
+        global_speaker_context: Speaker context string (can be compact or full format)
+        speaker_info: Optional speaker_info dict for lookup table creation
     """
-    print(f"\n🚀 Enhanced Speaker Identification with GPT-4")
-    print(f"   Total segments: {len(transcript_data)}")
-    print(f"   Batch size: {MAX_SEGMENTS_PER_GPT_BATCH}")
-    print(f"   Overlap: {BATCH_OVERLAP_SIZE} segments\n")
+    print(f"\n🚀 Speaker Diarization")
+    print(f"   Segments: {len(transcript_data)} | Batch size: {MAX_SEGMENTS_PER_GPT_BATCH} | Overlap: {BATCH_OVERLAP_SIZE}")
+    
+    # Create speaker lookup table for compact context
+    speaker_lookup, reverse_lookup = {}, {}
+    if speaker_info:
+        speaker_lookup, reverse_lookup = create_speaker_lookup_table(speaker_info)
+        # Use compact context format
+        global_speaker_context = create_global_speaker_context(speaker_info, compact=False)
     
     # Detect speaker boundaries for smarter batching
     boundaries = detect_speaker_boundaries(transcript_data, global_speaker_context)
-    print(f"   Detected {len(boundaries)} potential speaker boundaries")
+    if VERBOSE:
+        print(f"   Detected {len(boundaries)} potential speaker boundaries")
     
     all_filled_segments = []
+    total_tokens_used = 0
     i = 0
     batch_num = 1
     
@@ -472,16 +1064,26 @@ def fill_speakers_with_gpt_enhanced(transcript_data, global_speaker_context):
         
         batch = transcript_data[i:batch_end]
         
-        # Create context from previous batches
-        previous_context = create_speaker_context(all_filled_segments)
+        # Create compact context from previous batches
+        if speaker_lookup:
+            previous_context = filter_active_speakers(
+                all_filled_segments, 
+                speaker_lookup, 
+                reverse_lookup
+            )
+        else:
+            # Fallback to old method if lookup not available
+            previous_context = create_compact_previous_context(all_filled_segments)
         
         # Process batch
-        filled_batch = fill_speakers_in_batch_gpt(
+        filled_batch, batch_tokens = fill_speakers_in_batch_gpt(
             batch, batch_num, 
             math.ceil(len(transcript_data) / MAX_SEGMENTS_PER_GPT_BATCH),
             global_speaker_context,
             previous_context
         )
+        
+        total_tokens_used += batch_tokens
         
         if filled_batch is None:
             print(f"  ⚠ Batch {batch_num} failed, falling back to Gemini...")
@@ -508,10 +1110,10 @@ def fill_speakers_with_gpt_enhanced(transcript_data, global_speaker_context):
         i = batch_end - BATCH_OVERLAP_SIZE if batch_end < len(transcript_data) else batch_end
         batch_num += 1
     
-    print(f"\n✅ Enhanced processing complete!")
-    print(f"   Total segments processed: {len(all_filled_segments)}")
+    print(f"\n✅ Diarization complete: {len(all_filled_segments)} segments")
+    print(f"   📊 Total diarization tokens: {total_tokens_used:,}")
     
-    return all_filled_segments
+    return all_filled_segments, total_tokens_used
 
 
 def is_un_webtv_url(url: str) -> bool:
@@ -1177,37 +1779,46 @@ def extract_speaker_info_from_txt(transcript_text):
         print("Continuing without speaker context...")
         return {"speakers": []}
 
-def create_global_speaker_context(speaker_info):
-    """Create a comprehensive speaker context from the extracted speaker information."""
-    if not speaker_info.get('speakers'):
+def create_global_speaker_context(speaker_info, compact=False):
+    """
+    Create speaker context from extracted speaker information.
+    If compact=True, returns ultra-compact format for token optimization.
+    """
+    if not speaker_info or not speaker_info.get('speakers'):
         return ""
     
-    context = "\n\nKNOWN SPEAKERS IN THIS TRANSCRIPT:\n"
-    context += "=" * 50 + "\n"
-    
-    for speaker in speaker_info.get('speakers', []):
-        name = speaker.get('name', 'Unknown')
-        title = speaker.get('title', '')
-        org = speaker.get('organization', '')
-        country = speaker.get('country', '')
-        desc = speaker.get('description', '')
+    if compact:
+        # Ultra-compact format using lookup table
+        speaker_lookup, _ = create_speaker_lookup_table(speaker_info)
+        return create_compact_speaker_context(speaker_lookup)
+    else:
+        # Original format (for backward compatibility)
+        context = "\n\nKNOWN SPEAKERS IN THIS TRANSCRIPT:\n"
+        context += "=" * 50 + "\n"
         
-        context += f"• {name}"
-        if title:
-            context += f" - {title}"
-        if org:
-            context += f" at {org}"
-        if country:
-            context += f" (representing {country})"
-        if desc:
-            context += f"\n  Description: {desc}"
-        context += "\n"
-    
-    context += "=" * 50 + "\n"
-    context += "IMPORTANT: Use these EXACT speaker names when you recognize them in the transcript segments.\n"
-    context += "For speakers not in this list, use descriptive labels like 'Participant 1', 'Moderator', etc.\n\n"
-    
-    return context
+        for speaker in speaker_info.get('speakers', []):
+            name = speaker.get('name', 'Unknown')
+            title = speaker.get('title', '')
+            org = speaker.get('organization', '')
+            country = speaker.get('country', '')
+            desc = speaker.get('description', '')
+            
+            context += f"• {name}"
+            if title:
+                context += f" - {title}"
+            if org:
+                context += f" at {org}"
+            if country:
+                context += f" (representing {country})"
+            if desc:
+                context += f"\n  Description: {desc}"
+            context += "\n"
+        
+        context += "=" * 50 + "\n"
+        context += "IMPORTANT: Use these EXACT speaker names when you recognize them in the transcript segments.\n"
+        context += "For speakers not in this list, use descriptive labels like 'Participant 1', 'Moderator', etc.\n\n"
+        
+        return context
 
 def create_batches(transcript_data, max_segments_per_batch):
     """Split transcript data into manageable batches."""
@@ -1231,7 +1842,8 @@ def create_speaker_context(all_filled_segments):
                 speaker_examples[speaker_name] = []
             
             # Store up to 2 examples per speaker
-            if len(speaker_examples[speaker_name]) < 2:
+            # Use .get() to handle cases where small models return incomplete segments
+            if len(speaker_examples[speaker_name]) < 2 and segment.get("text"):
                 speaker_examples[speaker_name].append(segment["text"][:200])  # First 200 chars
     
     if not speaker_examples:
@@ -1271,7 +1883,7 @@ def fill_speakers_in_batch(batch_data, batch_number, total_batches, global_speak
     """Uses the Gemini API to fill in the speaker fields for a batch of transcript segments."""
     print(f"\nStep 2: Processing batch {batch_number}/{total_batches} ({len(batch_data)} segments)...")
 
-    batch_string = json.dumps(batch_data, indent=2)
+    batch_string = json.dumps(batch_data, separators=(',', ':'), ensure_ascii=False)
     
     # Estimate tokens for this batch
     estimated_tokens = estimate_tokens(batch_string)
@@ -1686,13 +2298,93 @@ def create_speakers_table(transcript_data, meeting_id):
     
     return table_data
 
+def check_for_existing_transcript(url: str, uploads_dir: Path):
+    """
+    Check if this URL has already been transcribed.
+    Returns: (existing_meeting, existing_dir) tuple or (None, None)
+    """
+    from app.models import Meeting
+    
+    # Normalize URL for comparison
+    normalized_url = url.strip().rstrip('/')
+    
+    # Query for completed meetings with same URL
+    existing_meeting = Meeting.query.filter(
+        Meeting.source_url == normalized_url,
+        Meeting.status == 'completed',
+        Meeting.transcript_path.isnot(None)  # Must have transcript
+    ).order_by(Meeting.created_at.desc()).first()  # Get most recent
+    
+    if existing_meeting:
+        # Verify ONLY transcript files exist
+        existing_dir = uploads_dir / f"meeting_{existing_meeting.id}"
+        
+        # Only check for the two transcript files
+        required_files = ['transcript.txt', 'transcript.srt']
+        all_files_exist = all((existing_dir / f).exists() for f in required_files)
+        
+        if all_files_exist:
+            # Silent success - logging handled by caller
+            return existing_meeting, existing_dir
+        else:
+            logger = get_logger(verbose=VERBOSE)
+            logger.warning(f"Found matching meeting #{existing_meeting.id} but transcript files are missing")
+    
+    return None, None
+
+def copy_transcript_files(source_dir: Path, target_dir: Path) -> Tuple[Path, Path]:
+    """
+    Copy only transcript files (txt and srt) from an existing meeting.
+    Returns: (transcript_path, srt_path)
+    """
+    import shutil
+    
+    # Silent operation - logging handled by caller
+    target_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Only copy the transcript files
+    transcript_file = 'transcript.txt'
+    srt_file = 'transcript.srt'
+    
+    source_transcript = source_dir / transcript_file
+    source_srt = source_dir / srt_file
+    
+    target_transcript = target_dir / transcript_file
+    target_srt = target_dir / srt_file
+    
+    # Copy transcript.txt
+    if source_transcript.exists():
+        shutil.copy2(source_transcript, target_transcript)
+    else:
+        raise FileNotFoundError(f"Source transcript not found: {source_transcript}")
+    
+    # Copy transcript.srt
+    if source_srt.exists():
+        shutil.copy2(source_srt, target_srt)
+    else:
+        raise FileNotFoundError(f"Source SRT not found: {source_srt}")
+    
+    return target_transcript, target_srt
+
 def run_full_pipeline(url: str, title: str, target_dir: str) -> Dict:
     """
-    Run the enhanced WebTV processing pipeline with the new logic from upgrade files
+    Run the enhanced WebTV processing pipeline with the new logic from upgrade files.
+    Now includes duplicate URL detection to reuse existing transcripts.
+    
+    If the URL has already been processed:
+    - Copies transcript.txt and transcript.srt from existing meeting
+    - Optionally copies audio.mp3 if available
+    - Skips download and transcription (saves ~10-15 minutes)
+    - Regenerates speaker identification and summaries with fresh AI processing
+    
     Returns: Dictionary with file paths and processing results
     """
     target_dir = Path(target_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Initialize clean progress logger
+    logger = get_logger(verbose=VERBOSE)
+    logger.start(title)
     
     results = {
         'audio': None,
@@ -1705,66 +2397,120 @@ def run_full_pipeline(url: str, title: str, target_dir: str) -> Dict:
     }
     
     try:
-        print(f"Starting enhanced pipeline for: {title}")
+        # ========== CHECK FOR EXISTING TRANSCRIPT ==========
+        logger.step("Checking for existing transcripts")
+        uploads_dir = target_dir.parent  # Get uploads directory
+        existing_meeting, existing_dir = check_for_existing_transcript(url, uploads_dir)
         
-        # Step 1: Download audio with English prioritization
-        print("Step 1: Downloading audio...")
-        audio_path, metadata = download_audio(url, str(target_dir))
-        results['audio'] = str(audio_path.relative_to(target_dir.parent))
-        results['metadata'] = metadata
+        if existing_meeting:
+            logger.step_complete(f"Found (Meeting #{existing_meeting.id})")
+            
+            # Copy ONLY transcript files
+            logger.step("Copying transcripts")
+            transcript_path, srt_path = copy_transcript_files(existing_dir, target_dir)
+            logger.step_complete("Saved ~12 minutes")
+            
+            # Also copy audio file if it exists (silent operation)
+            try:
+                import shutil
+                source_audio = existing_dir / 'audio.mp3'
+                target_audio = target_dir / 'audio.mp3'
+                if source_audio.exists():
+                    shutil.copy2(source_audio, target_audio)
+                    results['audio'] = str(target_audio.relative_to(target_dir.parent))
+                    logger.debug("Copied audio.mp3")
+            except Exception as e:
+                logger.warning(f"Could not copy audio file: {e}")
+            
+            # Set paths for copied files
+            results['transcript'] = str(transcript_path.relative_to(target_dir.parent))
+            results['srt'] = str(srt_path.relative_to(target_dir.parent))
+            
+            # Set metadata indicating this was reused
+            results['metadata'] = {
+                'title': title,
+                'reused_transcript': True,
+                'original_meeting_id': existing_meeting.id,
+                'source_type': 'Reused Transcript'
+            }
+            
+        else:
+            logger.step_complete("Not found")
+            
+            # ========== NO DUPLICATE - FULL PIPELINE ==========
+            # Step 1: Download audio with English prioritization
+            logger.step("Downloading audio")
+            start_time = time.time()
+            audio_path, metadata = download_audio(url, str(target_dir))
+            file_size_mb = metadata.get('file_size', 0) / (1024 * 1024)
+            logger.step_complete(f"{file_size_mb:.1f} MB")
+            results['audio'] = str(audio_path.relative_to(target_dir.parent))
+            results['metadata'] = metadata
+            
+            # Step 2: Transcribe audio with GPU support
+            device_name = "GPU" if TORCH_AVAILABLE and torch.cuda.is_available() else "CPU"
+            logger.step(f"Transcribing audio ({device_name})")
+            trans_start = time.time()
+            transcript_path, srt_path = transcribe_audio(audio_path, str(target_dir))
+            trans_duration = time.time() - trans_start
+            trans_minutes = int(trans_duration // 60)
+            trans_seconds = int(trans_duration % 60)
+            
+            # Count segments (quickly)
+            with open(srt_path, 'r', encoding='utf-8') as f:
+                segment_count = len([l for l in f.read().split('\n\n') if l.strip()])
+            
+            logger.step_complete(f"{segment_count} segments, {trans_minutes}m {trans_seconds}s")
+            results['transcript'] = str(transcript_path.relative_to(target_dir.parent))
+            results['srt'] = str(srt_path.relative_to(target_dir.parent))
         
-        # Step 2: Transcribe audio with GPU support
-        print("Step 2: Transcribing audio...")
-        transcript_path, srt_path = transcribe_audio(audio_path, str(target_dir))
-        results['transcript'] = str(transcript_path.relative_to(target_dir.parent))
-        results['srt'] = str(srt_path.relative_to(target_dir.parent))
+        # ========== COMMON PATH: Speaker Processing & Summaries ==========
+        # Step 3-4: Extract speakers
+        logger.step("Extracting speakers")
+        ai_model = "GPT-4" if get_azure_openai_config() else "Gemini"
+        logger.step_detail(f"Using {ai_model}")
         
-        # Step 3: Convert SRT to JSON using exact logic from srt_to_json.py
-        print("Step 3: Converting SRT to JSON...")
         json_path = target_dir / 'transcript.json'
         transcript_json = srt_to_json(srt_path, json_path)
         
-        # Step 4: Extract speaker context from full transcript
-        print("Step 4: Extracting speaker context from transcript...")
         with open(transcript_path, 'r', encoding='utf-8') as f:
             transcript_text = f.read()
         
-        # Try enhanced GPT-4 speaker extraction first, fall back to Gemini
+        # Extract speaker information (silently unless verbose)
         speaker_info = None
+        total_pipeline_tokens = 0
         if get_azure_openai_config():
-            print("  Using enhanced GPT-4 multi-pass extraction...")
-            speaker_info = extract_speaker_info_with_gpt(transcript_text)
-        
+            speaker_info, extraction_tokens = extract_speaker_info_with_gpt(transcript_text)
+            total_pipeline_tokens += extraction_tokens
         if speaker_info is None:
-            print("  Using Gemini for speaker extraction...")
             speaker_info = extract_speaker_info_from_txt(transcript_text)
         
-        global_speaker_context = create_global_speaker_context(speaker_info)
+        num_speakers = len(speaker_info.get('speakers', [])) if speaker_info else 0
+        logger.step_complete(f"{num_speakers} speakers identified")
         
         # Step 5: Fill speaker information
-        print("Step 5: Filling speaker information...")
+        logger.step("Organizing segments")
+        global_speaker_context = create_global_speaker_context(speaker_info, compact=False)  # Keep full format for Gemini fallback
+        
         filled_transcript = None
-        
-        # Try enhanced GPT-4 processing first, fall back to Gemini
+        diarization_tokens = 0
         if get_azure_openai_config():
-            print("  Using enhanced GPT-4 with overlapping batches...")
-            filled_transcript = fill_speakers_with_gpt_enhanced(transcript_json, global_speaker_context)
-        
+            filled_transcript, diarization_tokens = fill_speakers_with_gpt_enhanced(transcript_json, global_speaker_context, speaker_info)
+            total_pipeline_tokens += diarization_tokens
         if filled_transcript is None:
-            print("  Using Gemini for speaker identification...")
             filled_transcript = fill_speakers_in_json(transcript_json, global_speaker_context)
         
-        # Save filled transcript
+        # Save filled transcript (silent)
         filled_json_path = target_dir / 'transcript_speaker_filled.json'
         with open(filled_json_path, 'w', encoding='utf-8') as f:
             json.dump(filled_transcript, f, indent=2, ensure_ascii=False)
         
-        # Step 6: Create structured segments using exact logic from organize_speakers_table.py
-        print("Step 6: Creating structured speaker segments...")
-        structured_segments = create_speakers_table(filled_transcript, 1)  # meeting_id will be set by calling function
+        # Step 6-7: Create structured segments
+        structured_segments = create_speakers_table(filled_transcript, 1)
+        logger.step_complete(f"{len(structured_segments)} speaker turns")
         
-        # Step 7: Create speaker transcript file
-        print("Step 7: Creating speaker transcript file...")
+        # Create speaker transcript file
+        logger.step("Generating transcript")
         speakers_path = target_dir / 'transcript_speakers.txt'
         with open(speakers_path, 'w', encoding='utf-8') as f:
             f.write(f"# Speaker-separated transcript for: {title}\n\n")
@@ -1796,20 +2542,25 @@ def run_full_pipeline(url: str, title: str, target_dir: str) -> Dict:
         
         results['speakers'] = str(speakers_path.relative_to(target_dir.parent))
         results['segments'] = structured_segments
+        logger.step_complete()
         
-        print("Pipeline completed successfully!")
-        
-        # Clean up intermediate files
-        print("Cleaning up intermediate files...")
+        # Clean up intermediate files (silent)
+        logger.step("Cleaning up")
         if json_path.exists():
             json_path.unlink()
         if filled_json_path.exists():
             filled_json_path.unlink()
+        logger.step_complete()
+        
+        # Show completion with timing
+        if total_pipeline_tokens > 0:
+            print(f"\n🎯 Total pipeline tokens used: {total_pipeline_tokens:,}")
+        logger.complete()
         
     except Exception as e:
         error_msg = str(e)
         results['errors'].append(error_msg)
-        print(f"Pipeline failed: {error_msg}")
+        logger.error(f"Pipeline failed: {error_msg}")
         raise
     
     return results 

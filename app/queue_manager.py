@@ -4,12 +4,16 @@ Handles one meeting at a time with proper queue management
 """
 import threading
 import time
+import os
 from datetime import datetime
 from pathlib import Path
 from flask import current_app
 from app import db
 from app.models import Meeting, ProcessingQueue, Segment
 from app.pipeline import run_full_pipeline
+
+# Get verbose setting
+VERBOSE = os.environ.get('VERBOSE', 'false').lower() == 'true'
 
 class QueueManager:
     """Singleton queue manager for processing meetings sequentially"""
@@ -43,7 +47,8 @@ class QueueManager:
                 self._worker_thread = threading.Thread(target=self._worker_loop)
                 self._worker_thread.daemon = True
                 self._worker_thread.start()
-                print("Queue worker started")
+                if VERBOSE:
+                    print("Queue worker started")
     
     def stop_worker(self):
         """Stop the background worker thread"""
@@ -52,7 +57,8 @@ class QueueManager:
             self._stop_event.set()
             if self._worker_thread and self._worker_thread.is_alive():
                 self._worker_thread.join(timeout=5)
-                print("Queue worker stopped")
+                if VERBOSE:
+                    print("Queue worker stopped")
     
     def add_to_queue(self, meeting, priority=0):
         """Add a meeting to the processing queue"""
@@ -73,17 +79,19 @@ class QueueManager:
                 db.session.add(queue_item)
                 db.session.commit()
                 
-                print(f"Added meeting {meeting.id} to queue at position {queue_item.position_in_queue}")
+                if VERBOSE:
+                    print(f"Added meeting {meeting.id} to queue at position {queue_item.position_in_queue}")
                 return queue_item
         except Exception as e:
             error_msg = str(e).lower()
             if 'no such table' in error_msg or 'no such column' in error_msg:
-                print(f"Queue system not ready yet - falling back to immediate processing: {str(e)}")
+                if VERBOSE:
+                    print(f"Queue system not ready yet - falling back to immediate processing: {str(e)}")
                 # Fallback to immediate processing if queue system not ready
                 from app.tasks_backup import start_processing as fallback_start_processing
                 return fallback_start_processing(meeting)
             else:
-                print(f"Error adding to queue: {str(e)}")
+                print(f"Error adding to queue: {str(e)}")  # Always show errors
                 raise
     
     def get_queue_status(self):
@@ -115,7 +123,8 @@ class QueueManager:
                 }
         except Exception as e:
             # Return empty status if tables don't exist yet (during migration)
-            print(f"Queue status query failed (likely during migration): {e}")
+            if VERBOSE:
+                print(f"Queue status query failed (likely during migration): {e}")
             return {
                 'currently_processing': None,
                 'processing_meeting_id': None,
@@ -125,7 +134,8 @@ class QueueManager:
     
     def _worker_loop(self):
         """Main worker loop - processes one meeting at a time"""
-        print("Worker loop started")
+        if VERBOSE:
+            print("Worker loop started")
         
         while self._worker_running and not self._stop_event.is_set():
             try:
@@ -146,18 +156,22 @@ class QueueManager:
                 error_msg = str(e).lower()
                 # If tables don't exist, wait longer and continue (migration in progress)
                 if 'no such table' in error_msg or 'no such column' in error_msg:
-                    print(f"Database not ready yet (migration may be needed): {str(e)}")
+                    if VERBOSE:
+                        print(f"Database not ready yet (migration may be needed): {str(e)}")
                     time.sleep(30)  # Wait longer during migration
                 else:
-                    print(f"Worker loop error: {str(e)}")
-                    import traceback
-                    traceback.print_exc()
+                    print(f"Worker loop error: {str(e)}")  # Always show errors
+                    if VERBOSE:
+                        import traceback
+                        traceback.print_exc()
                     time.sleep(10)  # Wait before retrying
     
     def _process_queue_item(self, queue_item):
         """Process a single queue item"""
         try:
-            print(f"Starting processing of meeting {queue_item.meeting_id}")
+            # Silent - pipeline will handle its own logging
+            if VERBOSE:
+                print(f"Starting processing of meeting {queue_item.meeting_id}")
             
             # Update queue item status
             queue_item.status = 'processing'
@@ -199,29 +213,37 @@ class QueueManager:
                 db.session.add(segment)
             
             # Generate ITU-focused summary after pipeline completion
-            print("Step 8: Generating ITU-focused meeting summary...")
             try:
+                from app.progress import get_logger
                 from app.meeting_summarizer import process_meeting_summary
+                
+                logger = get_logger(verbose=VERBOSE)
+                logger.step("Generating ITU summary")
                 summary_success = process_meeting_summary(meeting.id, meeting_dir)
                 if summary_success:
-                    print(f"✅ ITU summary generated successfully for meeting {meeting.id}")
+                    logger.step_complete()
                 else:
-                    print(f"⚠️  ITU summary generation failed for meeting {meeting.id}")
+                    logger.step_complete("Failed")
             except Exception as e:
-                print(f"⚠️  Error generating ITU summary: {e}")
+                logger = get_logger(verbose=VERBOSE)
+                logger.warning(f"Error generating ITU summary: {e}")
                 # Don't fail the entire processing if summary fails
             
             # Generate professional meeting notes after summary completion
-            print("Step 9: Generating professional meeting notes...")
             try:
+                from app.progress import get_logger
                 from app.meeting_notes_generator import process_meeting_notes
+                
+                logger = get_logger(verbose=VERBOSE)
+                logger.step("Generating meeting notes")
                 notes_success = process_meeting_notes(meeting.id, meeting_dir, meeting.title)
                 if notes_success:
-                    print(f"✅ Meeting notes generated successfully for meeting {meeting.id}")
+                    logger.step_complete()
                 else:
-                    print(f"⚠️  Meeting notes generation failed for meeting {meeting.id}")
+                    logger.step_complete("Failed")
             except Exception as e:
-                print(f"⚠️  Error generating meeting notes: {e}")
+                logger = get_logger(verbose=VERBOSE)
+                logger.warning(f"Error generating meeting notes: {e}")
                 # Don't fail the entire processing if notes generation fails
             
             # Mark queue item as completed
@@ -230,13 +252,13 @@ class QueueManager:
             
             db.session.commit()
             
-            print(f"Successfully completed processing of meeting {meeting.id}")
-            
         except Exception as e:
             import traceback
             error_details = traceback.format_exc()
+            # Always show errors
             print(f"Pipeline error for meeting {queue_item.meeting_id}: {str(e)}")
-            print(f"Full traceback: {error_details}")
+            if VERBOSE:
+                print(f"Full traceback: {error_details}")
             
             # Update meeting status to error
             meeting = queue_item.meeting

@@ -149,7 +149,7 @@ def index():
                 # Handle URL input (existing functionality)
                 meeting = Meeting(
                     title=form.title.data,
-                    source_url=form.url.data,
+                    source_url=form.url.data.strip(),
                     status='queued',
                     created_by_user_id=current_user.id
                 )

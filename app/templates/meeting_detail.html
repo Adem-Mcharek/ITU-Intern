@@ -261,7 +261,7 @@
                             {% if meeting.source_url.find('webtv.un.org') != -1 %}
                             <div class="ms-2">
                                 <button class="btn btn-sm btn-outline-primary" 
-                                        onclick="openTimestampLink('{{ meeting.source_url }}', {{ segment.start_time|int }})"
+                                        onclick="openTimestampLink('{{ meeting.source_url.strip() }}', {{ segment.start_time|int }})"
                                         data-bs-toggle="tooltip" 
                                         title="Open timestamp link">
                                     <svg class="bi" width="12" height="12" fill="currentColor" viewBox="0 0 16 16">
