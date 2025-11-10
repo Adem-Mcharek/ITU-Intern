@@ -1,0 +1,73 @@
+# Flask WebTV Processing App - Optional Configuration
+# Copy this file to .env and uncomment/modify values as needed
+
+# =============================================================================
+# AI SERVICES (Optional)
+# =============================================================================
+
+# Google Gemini API Key for speaker identification
+# Get your key from: https://makersuite.google.com/app/apikey
+# GEMINI_API_KEY=your-gemini-api-key-here
+
+# Azure OpenAI API for enhanced speaker identification (GPT-4)
+# AZURE_OPENAI_API_KEY=your-azure-openai-api-key-here
+# AZURE_OPENAI_ENDPOINT=https://z-openai-openai4tsb-dev-chn.openai.azure.com/
+# AZURE_OPENAI_API_VERSION=2024-12-01-preview
+# AZURE_OPENAI_DEPLOYMENT_NAME=GPT-4
+
+# =============================================================================
+# FLASK SETTINGS (Optional)
+# =============================================================================
+
+# Secret key for Flask sessions (auto-generated if not set)
+# SECRET_KEY=your-secret-key-here
+
+# Enable Flask debug mode (default: True for development)
+# FLASK_DEBUG=True
+
+# =============================================================================
+# DATABASE (Optional)
+# =============================================================================
+
+# Override default SQLite database location
+# Default: app.db in project directory
+DATABASE_URL=sqlite:///instance/app.db
+
+# =============================================================================
+# FILE STORAGE (Optional)
+# =============================================================================
+
+# Override default uploads directory
+# Default: uploads/ in project directory
+# UPLOAD_FOLDER=/path/to/your/uploads
+
+# Maximum file upload size in bytes (default: 500MB)
+# MAX_CONTENT_LENGTH=524288000
+
+# =============================================================================
+# NOTES
+# =============================================================================
+
+# The app works perfectly without any environment variables!
+# These are all optional configurations for advanced users.
+#
+# Required for full AI features:
+# - GEMINI_API_KEY (for speaker identification)
+#
+# The app will work with basic functionality even without AI services.
+# Audio extraction and basic transcription work without API keys.
+
+# Flask Configuration
+SECRET_KEY=your-secret-key-here-change-in-production
+DEBUG=False
+
+# AI Processing Configuration
+OPENAI_API_KEY=your-openai-api-key-here-optional
+USE_GPU=false
+
+# Authentication Configuration
+ADMIN_EMAIL=admin@example.com
+
+# Application Configuration
+APP_VERSION=1.0.0
+GIT_HASH=development 

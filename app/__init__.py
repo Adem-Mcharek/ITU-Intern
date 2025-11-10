@@ -8,7 +8,6 @@ from flask import Flask
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 from flask_login import LoginManager
-from config import Config
 
 # Try to load environment variables from .env file (optional)
 try:
@@ -23,10 +22,9 @@ db = SQLAlchemy()
 migrate = Migrate()
 login = LoginManager()
 
-def create_app(config_class=Config):
+def create_app():
     """Create and configure the Flask application"""
     app = Flask(__name__)
-    app.config.from_object(config_class)
     
     # Simple configuration with optional environment variable overrides
     app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
@@ -47,6 +45,15 @@ def create_app(config_class=Config):
     
     # AI Services configuration
     app.config['GEMINI_API_KEY'] = os.environ.get('GEMINI_API_KEY')
+    
+    # Azure OpenAI configuration for enhanced speaker identification (GPT-4)
+    app.config['AZURE_OPENAI_API_KEY'] = os.environ.get('AZURE_OPENAI_API_KEY')
+    app.config['AZURE_OPENAI_ENDPOINT'] = os.environ.get('AZURE_OPENAI_ENDPOINT', 'https://z-openai-openai4tsb-dev-chn.openai.azure.com/')
+    app.config['AZURE_OPENAI_API_VERSION'] = os.environ.get('AZURE_OPENAI_API_VERSION', '2024-12-01-preview')
+    app.config['AZURE_OPENAI_DEPLOYMENT_NAME'] = os.environ.get('AZURE_OPENAI_DEPLOYMENT_NAME', 'GPT-4')
+    
+    # GPU configuration for Whisper transcription
+    app.config['USE_GPU'] = os.environ.get('USE_GPU', 'true')
     
     # Flask debug mode
     app.config['DEBUG'] = os.environ.get('FLASK_DEBUG', 'True').lower() == 'true'

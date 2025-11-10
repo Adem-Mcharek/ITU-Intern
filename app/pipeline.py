@@ -43,7 +43,18 @@ try:
     GEMINI_AVAILABLE = True
 except ImportError:
     GEMINI_AVAILABLE = False
+    genai = None  # type: ignore
     print("Warning: google-generativeai not available. Speaker separation will be disabled.")
+
+# Initialize Azure OpenAI imports
+AZURE_OPENAI_AVAILABLE = False
+AzureOpenAI = None  # type: ignore
+
+try:
+    from openai import AzureOpenAI
+    AZURE_OPENAI_AVAILABLE = True
+except ImportError:
+    print("Warning: openai not available. Enhanced speaker identification will be disabled.")
 
 # Configuration constants
 PARTNER_ID = "2503451"  # constant for all UN WebTV assets
@@ -58,6 +69,14 @@ MAX_SEGMENTS_PER_BATCH = MAX_TOKENS_PER_BATCH // ESTIMATED_TOKENS_PER_SEGMENT
 MAX_RETRIES = 3
 BASE_DELAY = 1  # Base delay in seconds
 MAX_DELAY = 60  # Maximum delay in seconds
+
+# Azure OpenAI Enhanced Speaker Identification Configuration
+# This provides better accuracy for speaker identification in long meetings
+MAX_SEGMENTS_PER_GPT_BATCH = 50  # GPT-4 can handle larger batches
+BATCH_OVERLAP_SIZE = 5  # Overlapping segments for better context continuity
+DEFAULT_AZURE_ENDPOINT = "https://z-openai-openai4tsb-dev-chn.openai.azure.com/"
+DEFAULT_DEPLOYMENT_NAME = "GPT-4"
+DEFAULT_API_VERSION = "2024-12-01-preview"
 
 # Enhanced Gemini prompt for better speaker separation
 GEMINI_PROMPT_FOR_CONTEXT = '''
@@ -111,6 +130,389 @@ def setup_gemini_api():
         genai.configure(api_key=api_key)
         return genai.GenerativeModel(MODEL_NAME)
     return None
+
+
+# ============================================================================
+# ENHANCED SPEAKER IDENTIFICATION WITH AZURE OPENAI (GPT-4)
+# ============================================================================
+
+def get_azure_openai_config():
+    """Get Azure OpenAI configuration from Flask app or environment"""
+    config = {}
+    try:
+        from flask import current_app
+        config['api_key'] = current_app.config.get('AZURE_OPENAI_API_KEY')
+        config['endpoint'] = current_app.config.get('AZURE_OPENAI_ENDPOINT', DEFAULT_AZURE_ENDPOINT)
+        config['api_version'] = current_app.config.get('AZURE_OPENAI_API_VERSION', DEFAULT_API_VERSION)
+        config['deployment'] = current_app.config.get('AZURE_OPENAI_DEPLOYMENT_NAME', DEFAULT_DEPLOYMENT_NAME)
+    except RuntimeError:
+        config['api_key'] = os.environ.get('AZURE_OPENAI_API_KEY')
+        config['endpoint'] = os.environ.get('AZURE_OPENAI_ENDPOINT', DEFAULT_AZURE_ENDPOINT)
+        config['api_version'] = os.environ.get('AZURE_OPENAI_API_VERSION', DEFAULT_API_VERSION)
+        config['deployment'] = os.environ.get('AZURE_OPENAI_DEPLOYMENT_NAME', DEFAULT_DEPLOYMENT_NAME)
+    
+    # Check if all required config is present
+    if config['api_key'] and config['endpoint']:
+        return config
+    return None
+
+
+def setup_azure_openai_client():
+    """Initialize Azure OpenAI client if configured"""
+    if not AZURE_OPENAI_AVAILABLE:
+        return None
+    
+    config = get_azure_openai_config()
+    if not config:
+        return None
+    
+    try:
+        client = AzureOpenAI(
+            api_key=config['api_key'],
+            api_version=config['api_version'],
+            azure_endpoint=config['endpoint']
+        )
+        return client, config['deployment']
+    except Exception as e:
+        print(f"Error initializing Azure OpenAI client: {e}")
+        return None
+
+
+def extract_speaker_info_with_gpt(transcript_text):
+    """
+    Multi-pass speaker extraction using GPT-4 for better accuracy.
+    
+    Pass 1: Extract all speaker mentions and introductions
+    Pass 2: Build comprehensive speaker profiles with validation
+    """
+    print("\n🔍 Enhanced Speaker Extraction with GPT-4 (Multi-Pass)")
+    
+    client_info = setup_azure_openai_client()
+    if not client_info:
+        print("Azure OpenAI not configured, falling back to Gemini...")
+        return None
+    
+    client, deployment = client_info
+    
+    # Pass 1: Extract speaker mentions
+    print("  Pass 1: Extracting all speaker mentions...")
+    pass1_prompt = f"""You are an expert in analyzing meeting transcripts.
+
+Analyze this transcript and extract ALL mentions of speakers, including:
+1. Direct introductions ("My name is...", "I am...", "This is...")
+2. References to speakers ("As mentioned by...", "Thank you...")
+3. Third-party introductions ("Please welcome...", "Next we have...")
+4. Self-identifications with context
+
+Return a JSON object with this structure:
+{{
+    "speaker_mentions": [
+        {{
+            "name": "Full name or identifier",
+            "context": "The sentence/phrase where they were mentioned",
+            "mention_type": "introduction|reference|self-identification"
+        }}
+    ]
+}}
+
+Transcript (first 5000 characters):
+{transcript_text[:5000]}
+
+Return ONLY the JSON object."""
+
+    try:
+        response1 = client.chat.completions.create(
+            model=deployment,
+            messages=[{"role": "user", "content": pass1_prompt}],
+            temperature=0.1,
+            top_p=1.0,
+            max_tokens=2000
+        )
+        
+        mentions_text = response1.choices[0].message.content.strip()
+        if mentions_text.startswith("```json"):
+            mentions_text = mentions_text[7:]
+        if mentions_text.endswith("```"):
+            mentions_text = mentions_text[:-3]
+        
+        speaker_mentions = json.loads(mentions_text.strip())
+        print(f"  ✓ Found {len(speaker_mentions.get('speaker_mentions', []))} speaker mentions")
+        
+    except Exception as e:
+        print(f"  ✗ Pass 1 failed: {e}")
+        return None
+    
+    # Pass 2: Build comprehensive speaker profiles
+    print("  Pass 2: Building speaker profiles with validation...")
+    pass2_prompt = f"""Based on these speaker mentions, create comprehensive speaker profiles.
+
+Speaker Mentions:
+{json.dumps(speaker_mentions, indent=2)}
+
+Full Transcript (for context):
+{transcript_text[:8000]}
+
+Create a JSON object with this structure:
+{{
+    "speakers": [
+        {{
+            "name": "Full name (standardized)",
+            "title": "Their position/role",
+            "organization": "Organization/Country they represent",
+            "country": "Country if applicable",
+            "description": "Key identifying information"
+        }}
+    ]
+}}
+
+Rules:
+1. Standardize names (e.g., "Dr. Smith" and "Smith" → "Dr. Smith")
+2. Merge duplicate entries for the same person
+3. Only include speakers clearly identified in the transcript
+4. Prioritize speakers with explicit introductions
+
+Return ONLY the JSON object."""
+
+    try:
+        response2 = client.chat.completions.create(
+            model=deployment,
+            messages=[{"role": "user", "content": pass2_prompt}],
+            temperature=0.1,
+            top_p=1.0,
+            max_tokens=3000
+        )
+        
+        profiles_text = response2.choices[0].message.content.strip()
+        if profiles_text.startswith("```json"):
+            profiles_text = profiles_text[7:]
+        if profiles_text.endswith("```"):
+            profiles_text = profiles_text[:-3]
+        
+        speaker_info = json.loads(profiles_text.strip())
+        
+        print(f"  ✓ Created profiles for {len(speaker_info.get('speakers', []))} speakers:")
+        for speaker in speaker_info.get('speakers', [])[:5]:  # Show first 5
+            print(f"    • {speaker.get('name', 'Unknown')}: {speaker.get('title', '')} at {speaker.get('organization', '')}")
+        
+        if len(speaker_info.get('speakers', [])) > 5:
+            print(f"    ... and {len(speaker_info['speakers']) - 5} more")
+        
+        return speaker_info
+        
+    except Exception as e:
+        print(f"  ✗ Pass 2 failed: {e}")
+        return None
+
+
+def detect_speaker_boundaries(segments, global_context):
+    """
+    Detect likely speaker change points in the transcript.
+    Returns indices where speaker changes are likely.
+    """
+    boundaries = [0]  # Always start at beginning
+    
+    for i in range(1, len(segments)):
+        current_text = segments[i]['text'].lower()
+        prev_text = segments[i-1]['text'].lower() if i > 0 else ""
+        
+        # Detect speaker change indicators
+        change_indicators = [
+            'thank you', 'thanks', 'next speaker', 'now we have',
+            'moving on', 'i would like to', 'my name is',
+            'i am', "i'm from", 'representing'
+        ]
+        
+        # Check for significant pause (time gap)
+        if i > 0:
+            prev_end = segments[i-1]['end']
+            current_start = segments[i]['start']
+            
+            # Convert timestamps to seconds for comparison
+            def time_to_seconds(time_str):
+                parts = time_str.split(':')
+                h, m, s = int(parts[0]), int(parts[1]), float(parts[2])
+                return h * 3600 + m * 60 + s
+            
+            try:
+                gap = time_to_seconds(current_start) - time_to_seconds(prev_end)
+                if gap > 3:  # More than 3 seconds gap
+                    boundaries.append(i)
+                    continue
+            except:
+                pass
+        
+        # Check for change indicators in text
+        for indicator in change_indicators:
+            if indicator in current_text:
+                boundaries.append(i)
+                break
+    
+    return sorted(set(boundaries))
+
+
+def fill_speakers_in_batch_gpt(batch_data, batch_number, total_batches, global_speaker_context, previous_speaker_context):
+    """
+    Enhanced batch processing with GPT-4 for better accuracy.
+    Includes validation and automatic recovery from errors.
+    """
+    print(f"\n📝 Processing batch {batch_number}/{total_batches} with GPT-4 ({len(batch_data)} segments)...")
+    
+    client_info = setup_azure_openai_client()
+    if not client_info:
+        print("  Azure OpenAI not available, falling back to Gemini...")
+        return None
+    
+    client, deployment = client_info
+    
+    batch_string = json.dumps(batch_data, indent=2)
+    
+    prompt = f"""You are an expert in speaker diarization for meeting transcripts.
+
+Analyze this transcript batch (part {batch_number} of {total_batches}) and identify speakers for each segment.
+
+{global_speaker_context}
+
+{previous_speaker_context}
+
+CRITICAL RULES:
+1. Use EXACT names from "KNOWN SPEAKERS" when you recognize them
+2. Maintain consistency with previous batches
+3. Use clear labels for unknown speakers (e.g., "Participant 1", "Moderator")
+4. Fill the "speaker" field for EVERY segment
+5. Return the COMPLETE JSON array with ALL segments
+
+Input Batch:
+```json
+{batch_string}
+```
+
+Return ONLY the filled JSON array, starting with [ and ending with ].
+Ensure every segment has a speaker assigned."""
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            print(f"  Attempt {attempt + 1}/{MAX_RETRIES}...")
+            
+            response = client.chat.completions.create(
+                model=deployment,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                top_p=1.0,
+                max_tokens=8000
+            )
+            
+            result_text = response.choices[0].message.content.strip()
+            
+            # Clean JSON markers
+            if result_text.startswith("```json"):
+                result_text = result_text[7:]
+            if result_text.endswith("```"):
+                result_text = result_text[:-3]
+            
+            result_text = result_text.strip()
+            
+            # Validate JSON structure
+            if not result_text.endswith(']'):
+                raise ValueError("Incomplete JSON response")
+            
+            filled_data = json.loads(result_text)
+            
+            # Validate segment count
+            if len(filled_data) != len(batch_data):
+                print(f"  ⚠ Warning: Expected {len(batch_data)} segments, got {len(filled_data)}")
+                raise ValueError(f"Segment count mismatch")
+            
+            # Validate all speakers are filled
+            empty_count = sum(1 for seg in filled_data if not seg.get('speaker', '').strip())
+            if empty_count > 0:
+                print(f"  ⚠ Warning: {empty_count} segments have empty speakers")
+            
+            print(f"  ✓ Successfully processed batch {batch_number}/{total_batches}")
+            return filled_data
+            
+        except Exception as e:
+            print(f"  ✗ Attempt {attempt + 1} failed: {e}")
+            if attempt < MAX_RETRIES - 1:
+                delay = min(BASE_DELAY * (2 ** attempt), MAX_DELAY)
+                print(f"  Retrying in {delay:.1f}s...")
+                time.sleep(delay)
+    
+    print(f"  ✗ All attempts failed for batch {batch_number}")
+    return None
+
+
+def fill_speakers_with_gpt_enhanced(transcript_data, global_speaker_context):
+    """
+    Enhanced speaker filling using GPT-4 with overlapping batches.
+    Provides better context continuity and speaker consistency.
+    """
+    print(f"\n🚀 Enhanced Speaker Identification with GPT-4")
+    print(f"   Total segments: {len(transcript_data)}")
+    print(f"   Batch size: {MAX_SEGMENTS_PER_GPT_BATCH}")
+    print(f"   Overlap: {BATCH_OVERLAP_SIZE} segments\n")
+    
+    # Detect speaker boundaries for smarter batching
+    boundaries = detect_speaker_boundaries(transcript_data, global_speaker_context)
+    print(f"   Detected {len(boundaries)} potential speaker boundaries")
+    
+    all_filled_segments = []
+    i = 0
+    batch_num = 1
+    
+    while i < len(transcript_data):
+        # Determine batch end (prefer ending at a boundary)
+        batch_end = min(i + MAX_SEGMENTS_PER_GPT_BATCH, len(transcript_data))
+        
+        # Adjust to nearest boundary if close
+        for boundary in boundaries:
+            if i < boundary <= batch_end and batch_end < len(transcript_data):
+                if abs(boundary - batch_end) < 10:  # Within 10 segments
+                    batch_end = boundary
+                    break
+        
+        batch = transcript_data[i:batch_end]
+        
+        # Create context from previous batches
+        previous_context = create_speaker_context(all_filled_segments)
+        
+        # Process batch
+        filled_batch = fill_speakers_in_batch_gpt(
+            batch, batch_num, 
+            math.ceil(len(transcript_data) / MAX_SEGMENTS_PER_GPT_BATCH),
+            global_speaker_context,
+            previous_context
+        )
+        
+        if filled_batch is None:
+            print(f"  ⚠ Batch {batch_num} failed, falling back to Gemini...")
+            # Fallback to Gemini for this batch
+            filled_batch = fill_speakers_in_batch(
+                batch, batch_num,
+                math.ceil(len(transcript_data) / MAX_SEGMENTS_PER_GPT_BATCH),
+                global_speaker_context,
+                previous_context
+            )
+        
+        if filled_batch is None:
+            print(f"  ⚠ Both GPT and Gemini failed, using original batch")
+            filled_batch = batch
+        
+        # Add non-overlapping segments
+        if batch_num == 1:
+            all_filled_segments.extend(filled_batch)
+        else:
+            # Skip overlapping segments from previous batch
+            all_filled_segments.extend(filled_batch[BATCH_OVERLAP_SIZE:])
+        
+        # Move to next batch with overlap
+        i = batch_end - BATCH_OVERLAP_SIZE if batch_end < len(transcript_data) else batch_end
+        batch_num += 1
+    
+    print(f"\n✅ Enhanced processing complete!")
+    print(f"   Total segments processed: {len(all_filled_segments)}")
+    
+    return all_filled_segments
+
 
 def is_un_webtv_url(url: str) -> bool:
     """Check if the URL is from UN WebTV"""
@@ -633,8 +1035,28 @@ def transcribe_audio(audio_path: Path, out_dir: str, model_size: str = "medium.e
     out_dir.mkdir(parents=True, exist_ok=True)
     
     try:
-        # Use GPU if available
-        device = "cuda" if TORCH_AVAILABLE and torch.cuda.is_available() else "cpu"
+        # Check USE_GPU setting from environment or config
+        use_gpu = True  # Default to True
+        try:
+            from flask import current_app
+            use_gpu_str = current_app.config.get('USE_GPU', 'true')
+        except RuntimeError:
+            use_gpu_str = os.environ.get('USE_GPU', 'true')
+        
+        # Convert string to boolean
+        use_gpu = use_gpu_str.lower() in ('true', '1', 'yes', 'on')
+        
+        # Use GPU if enabled and available
+        if use_gpu and TORCH_AVAILABLE and torch.cuda.is_available():
+            device = "cuda"
+            print(f"✓ GPU enabled - Loading Whisper model '{model_size}' on CUDA")
+        else:
+            device = "cpu"
+            if use_gpu:
+                print(f"⚠ GPU requested but not available - Using CPU instead")
+            else:
+                print(f"GPU disabled - Using CPU for transcription")
+        
         print(f"Loading Whisper model '{model_size}' on {device.upper()}")
         
         # Load Whisper model
@@ -1302,16 +1724,35 @@ def run_full_pipeline(url: str, title: str, target_dir: str) -> Dict:
         json_path = target_dir / 'transcript.json'
         transcript_json = srt_to_json(srt_path, json_path)
         
-        # Step 4: Extract speaker context from full transcript using Gemini
+        # Step 4: Extract speaker context from full transcript
         print("Step 4: Extracting speaker context from transcript...")
         with open(transcript_path, 'r', encoding='utf-8') as f:
             transcript_text = f.read()
-        speaker_info = extract_speaker_info_from_txt(transcript_text)
+        
+        # Try enhanced GPT-4 speaker extraction first, fall back to Gemini
+        speaker_info = None
+        if get_azure_openai_config():
+            print("  Using enhanced GPT-4 multi-pass extraction...")
+            speaker_info = extract_speaker_info_with_gpt(transcript_text)
+        
+        if speaker_info is None:
+            print("  Using Gemini for speaker extraction...")
+            speaker_info = extract_speaker_info_from_txt(transcript_text)
+        
         global_speaker_context = create_global_speaker_context(speaker_info)
         
-        # Step 5: Fill speaker information using exact logic from gemini_speaker_diarization_copy.py
-        print("Step 5: Filling speaker information using Gemini...")
-        filled_transcript = fill_speakers_in_json(transcript_json, global_speaker_context)
+        # Step 5: Fill speaker information
+        print("Step 5: Filling speaker information...")
+        filled_transcript = None
+        
+        # Try enhanced GPT-4 processing first, fall back to Gemini
+        if get_azure_openai_config():
+            print("  Using enhanced GPT-4 with overlapping batches...")
+            filled_transcript = fill_speakers_with_gpt_enhanced(transcript_json, global_speaker_context)
+        
+        if filled_transcript is None:
+            print("  Using Gemini for speaker identification...")
+            filled_transcript = fill_speakers_in_json(transcript_json, global_speaker_context)
         
         # Save filled transcript
         filled_json_path = target_dir / 'transcript_speaker_filled.json'
