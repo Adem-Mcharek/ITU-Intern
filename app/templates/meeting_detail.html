@@ -225,8 +225,8 @@
             
             <div class="segments-container">
                 {% for segment in segments %}
-                {% if segment.representing and segment.representing.strip() %}
-                    {% set speaker_display = segment.representing + " (" + segment.speaker + ")" %}
+                {% if segment.representing and segment.representing.strip() and segment.representing not in segment.speaker %}
+                    {% set speaker_display = segment.representing + " - " + segment.speaker   %}
                 {% else %}
                     {% set speaker_display = segment.speaker %}
                 {% endif %}
