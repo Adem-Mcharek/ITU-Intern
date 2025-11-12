@@ -255,58 +255,10 @@ def setup_azure_openai_client():
         return None
 
 
-def get_openai_config():
-    """Get OpenAI API configuration from Flask app or environment"""
-    config = {}
-    try:
-        from flask import current_app
-        config['api_key'] = current_app.config.get('OPENAI_API_KEY')
-        config['model'] = current_app.config.get('OPENAI_MODEL_NAME', 'gpt-4-turbo')
-        config['org_id'] = current_app.config.get('OPENAI_ORG_ID')
-        config['base_url'] = current_app.config.get('OPENAI_BASE_URL', 'https://api.openai.com/v1')
-    except RuntimeError:
-        config['api_key'] = os.environ.get('OPENAI_API_KEY')
-        config['model'] = os.environ.get('OPENAI_MODEL_NAME', 'gpt-4-turbo')
-        config['org_id'] = os.environ.get('OPENAI_ORG_ID')
-        config['base_url'] = os.environ.get('OPENAI_BASE_URL', 'https://api.openai.com/v1')
-    
-    # Check if API key is present
-    if config['api_key']:
-        return config
-    return None
-
-
-def setup_openai_client():
-    """Initialize OpenAI client if configured (PRIMARY)"""
-    if not AZURE_OPENAI_AVAILABLE:  # Uses same OpenAI library
-        return None
-    
-    config = get_openai_config()
-    if not config:
-        return None
-    
-    try:
-        from openai import OpenAI
-        client_kwargs = {
-            'api_key': config['api_key'],
-            'base_url': config['base_url']
-        }
-        if config.get('org_id'):
-            client_kwargs['organization'] = config['org_id']
-        
-        client = OpenAI(**client_kwargs)
-        return client, config['model']
-    except Exception as e:
-        print(f"Error initializing OpenAI client: {e}")
-        return None
-
-
 def extract_speaker_info_with_gpt(transcript_text):
     """
-    Multi-pass speaker extraction with priority order:
-    1. Azure OpenAI (GPT-4) - PRIMARY
-    2. OpenAI API (GPT-5/GPT-4 Turbo) - SECONDARY
-    3. Ollama (Gemma 3) - TERTIARY
+    Multi-pass speaker extraction with Azure OpenAI GPT-4 as primary,
+    Ollama (Gemma 3) as fallback.
     
     Pass 1: Extract all speaker mentions and introductions
     Pass 2: Build comprehensive speaker profiles with validation
@@ -315,25 +267,19 @@ def extract_speaker_info_with_gpt(transcript_text):
     """
     print("\n🔍 Speaker Extraction (Multi-Pass)")
     
-    # Try Azure OpenAI GPT-4 first (PRIMARY)
+    # Try Azure OpenAI GPT-4 first
     client_info = setup_azure_openai_client()
     if client_info:
         client, deployment = client_info
         provider = "Azure GPT-4"
     else:
-        # Fallback to OpenAI API (SECONDARY)
-        client_info = setup_openai_client()
-        if client_info:
-            client, deployment = client_info
-            provider = f"OpenAI {deployment}"
-        else:
-            # Fallback to Ollama (TERTIARY)
-            client_info = setup_ollama_client()
-            if not client_info:
-                print("  ✗ No AI service available")
-                return None, 0
-            client, deployment = client_info
-            provider = "Ollama"
+        # Fallback to Ollama
+        client_info = setup_ollama_client()
+        if not client_info:
+            print("  ✗ No AI service available")
+            return None, 0
+        client, deployment = client_info
+        provider = "Ollama"
     
     # Track total tokens
     total_tokens_used = 0
@@ -408,22 +354,13 @@ Return ONLY the JSON object. Be thorough - we need complete speaker information 
     try:
         start_time = time.time()
         
-        # Build API parameters dynamically based on provider
-        # GPT-5 only accepts default temperature/top_p, others allow customization
-        token_param = 'max_completion_tokens' if 'OpenAI' in provider else 'max_tokens'
-        
-        api_params = {
-            'model': deployment,
-            'messages': [{"role": "user", "content": pass1_prompt}],
-            token_param: 10000
-        }
-        
-        # Only add temperature/top_p for non-OpenAI providers (GPT-5 restriction)
-        if 'OpenAI' not in provider:
-            api_params['temperature'] = 0.1
-            api_params['top_p'] = 1.0
-        
-        response1 = client.chat.completions.create(**api_params)
+        response1 = client.chat.completions.create(
+            model=deployment,
+            messages=[{"role": "user", "content": pass1_prompt}],
+            temperature=0.1,
+            top_p=1.0,
+            max_tokens=10000
+        )
         
         elapsed = time.time() - start_time
         
@@ -537,22 +474,13 @@ Return ONLY the JSON object. Focus on accuracy over quantity - we need reliable 
     try:
         start_time = time.time()
         
-        # Build API parameters dynamically based on provider
-        # GPT-5 only accepts default temperature/top_p, others allow customization
-        token_param = 'max_completion_tokens' if 'OpenAI' in provider else 'max_tokens'
-        
-        api_params = {
-            'model': deployment,
-            'messages': [{"role": "user", "content": pass2_prompt}],
-            token_param: 15000
-        }
-        
-        # Only add temperature/top_p for non-OpenAI providers (GPT-5 restriction)
-        if 'OpenAI' not in provider:
-            api_params['temperature'] = 0.1
-            api_params['top_p'] = 1.0
-        
-        response2 = client.chat.completions.create(**api_params)
+        response2 = client.chat.completions.create(
+            model=deployment,
+            messages=[{"role": "user", "content": pass2_prompt}],
+            temperature=0.1,
+            top_p=1.0,
+            max_tokens=15000
+        )
         
         elapsed = time.time() - start_time
         
@@ -630,7 +558,6 @@ def decompress_batch_response(response_text, original_batch):
     """
     Parse LLM response and map back to full structure
     Handles both compressed format [[index, speaker], ...] and full JSON fallback
-    With robust regex fallback for malformed JSON
     """
     try:
         # Clean response text
@@ -684,37 +611,7 @@ def decompress_batch_response(response_text, original_batch):
                 return parsed
                 
     except (json.JSONDecodeError, ValueError, KeyError) as e:
-        print(f"  ⚠ Decompression error: {e}, trying regex fallback...")
-        
-        # Regex fallback: Extract [index, "speaker"] pairs even from malformed JSON
-        # Pattern matches: [123, "Speaker Name"] or [123,"Speaker Name"]
-        pattern = r'\[(\d+)\s*,\s*"([^"]+)"\]'
-        matches = re.findall(pattern, response_text)
-        
-        if matches:
-            filled_batch = original_batch.copy()
-            speaker_map = {}
-            
-            for idx_str, speaker in matches:
-                try:
-                    idx = int(idx_str)
-                    speaker_map[idx] = speaker.strip()
-                except ValueError:
-                    continue
-            
-            # Map speakers back to segments
-            for seg in filled_batch:
-                seg_idx = seg.get('index', 0)
-                if seg_idx in speaker_map:
-                    seg['speaker'] = speaker_map[seg_idx]
-            
-            recovered_count = len(speaker_map)
-            total_count = len(original_batch)
-            print(f"  ✓ Regex fallback recovered {recovered_count}/{total_count} segments ({recovered_count/total_count*100:.1f}%)")
-            
-            return filled_batch
-        else:
-            print(f"  ✗ Regex fallback found no valid pairs")
+        print(f"  ⚠ Decompression error: {e}, trying fallback parsing...")
     
     # If all parsing fails, return original with empty speakers
     return original_batch
@@ -963,35 +860,27 @@ def detect_speaker_boundaries(segments, global_context):
 
 def fill_speakers_in_batch_gpt(batch_data, batch_number, total_batches, global_speaker_context, previous_speaker_context):
     """
-    Enhanced batch processing with priority order:
-    1. Azure OpenAI (GPT-4) - PRIMARY
-    2. OpenAI API (GPT-5/GPT-4 Turbo) - SECONDARY
-    3. Ollama (Gemma 3) - TERTIARY
+    Enhanced batch processing with Azure OpenAI GPT-4 as primary,
+    Ollama (Gemma 3) as fallback.
     Includes validation, automatic recovery, and token tracking.
     
     Returns: (filled_data, tokens_used)
     """
     print(f"\n📝 Batch {batch_number}/{total_batches} ({len(batch_data)} segments)")
     
-    # Try Azure OpenAI GPT-4 first (PRIMARY)
+    # Try Azure OpenAI GPT-4 first
     client_info = setup_azure_openai_client()
     if client_info:
         client, deployment = client_info
         provider = "Azure GPT-4"
     else:
-        # Fallback to OpenAI API (SECONDARY)
-        client_info = setup_openai_client()
-        if client_info:
-            client, deployment = client_info
-            provider = f"OpenAI {deployment}"
-        else:
-            # Fallback to Ollama (TERTIARY)
-            client_info = setup_ollama_client()
-            if not client_info:
-                print("  ✗ No AI service available")
-                return None, 0
-            client, deployment = client_info
-            provider = "Ollama"
+        # Fallback to Ollama
+        client_info = setup_ollama_client()
+        if not client_info:
+            print("  ✗ No AI service available")
+            return None, 0
+        client, deployment = client_info
+        provider = "Ollama"
     
     # Compress batch to minimal format
     compressed_batch = compress_batch_for_llm(batch_data)
@@ -1019,22 +908,13 @@ Rules: Use exact names from SPK when recognized. Fill speaker for every segment.
             # Track timing
             start_time = time.time()
             
-            # Build API parameters dynamically based on provider
-            # GPT-5 only accepts default temperature/top_p, others allow customization
-            token_param = 'max_completion_tokens' if 'OpenAI' in provider else 'max_tokens'
-            
-            api_params = {
-                'model': deployment,
-                'messages': [{"role": "user", "content": prompt}],
-                token_param: 16384
-            }
-            
-            # Only add temperature/top_p for non-OpenAI providers (GPT-5 restriction)
-            if 'OpenAI' not in provider:
-                api_params['temperature'] = 0.1
-                api_params['top_p'] = 1.0
-            
-            response = client.chat.completions.create(**api_params)
+            response = client.chat.completions.create(
+                model=deployment,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.1,
+                top_p=1.0,
+                max_tokens=16384  # GPT-4 max output tokens limit
+            )
             
             elapsed = time.time() - start_time
             
@@ -1081,12 +961,6 @@ Rules: Use exact names from SPK when recognized. Fill speaker for every segment.
             empty_count = sum(1 for seg in filled_data if not seg.get('speaker', '').strip())
             if empty_count > 0:
                 print(f"  ⚠ {empty_count} segments missing speakers")
-                
-                # If too many segments are missing speakers (>80%), likely a decompression failure
-                # Trigger retry by raising an exception
-                empty_ratio = empty_count / len(batch_data)
-                if empty_ratio > 0.8:
-                    raise ValueError(f"Decompression likely failed: {empty_count}/{len(batch_data)} segments missing speakers ({empty_ratio*100:.1f}%)")
             
             return filled_data, tokens_used
             
@@ -2394,852 +2268,9 @@ def group_consecutive_segments(transcript_data):
     
     return grouped_segments
 
-def parse_speakers_list_file(file_path):
-    """
-    Parse speakers_list.txt file to extract structured speaker profiles.
-    Returns list of speaker profile dictionaries.
-    """
-    from pathlib import Path
-    
-    file_path = Path(file_path)
-    if not file_path.exists():
-        return []
-    
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-    except Exception as e:
-        print(f"Warning: Could not read speakers_list.txt: {e}")
-        return []
-    
-    profiles = []
-    
-    # Split by speaker sections (SPEAKER #N)
-    speaker_blocks = re.split(r'SPEAKER #\d+\n-{40}\n', content)
-    
-    for block in speaker_blocks[1:]:  # Skip first empty split
-        if not block.strip():
-            continue
-        
-        profile = {
-            'name': None,
-            'title': None,
-            'organization': None,
-            'country': None,
-            'type': None,
-            'description': None,
-            'alternative_names': []
-        }
-        
-        # Parse each field
-        for line in block.split('\n'):
-            line = line.strip()
-            if not line or line.startswith('='):
-                continue
-            
-            if line.startswith('Name: '):
-                profile['name'] = line[6:].strip()
-            elif line.startswith('Title: '):
-                profile['title'] = line[7:].strip()
-            elif line.startswith('Organization: '):
-                profile['organization'] = line[14:].strip()
-            elif line.startswith('Country: '):
-                profile['country'] = line[9:].strip()
-            elif line.startswith('Type: '):
-                profile['type'] = line[6:].strip()
-            elif line.startswith('Description: '):
-                profile['description'] = line[13:].strip()
-            elif line.startswith('Also known as: '):
-                alt_names_str = line[15:].strip()
-                profile['alternative_names'] = [n.strip() for n in alt_names_str.split(',') if n.strip()]
-        
-        # Only add if we have at least a name
-        if profile['name']:
-            profiles.append(profile)
-    
-    return profiles
-
-def match_speaker_to_profile(speaker_name, speaker_profiles):
-    """
-    Match a speaker name from transcript to a profile using smart matching.
-    Returns matched profile or None.
-    """
-    if not speaker_name or not speaker_profiles:
-        return None
-    
-    speaker_name_lower = speaker_name.lower().strip()
-    
-    # Exact match: Check against profile name and alternative names
-    for profile in speaker_profiles:
-        # Check main name
-        if profile['name'] and profile['name'].lower().strip() == speaker_name_lower:
-            return profile
-        
-        # Check alternative names
-        for alt_name in profile.get('alternative_names', []):
-            if alt_name.lower().strip() == speaker_name_lower:
-                return profile
-    
-    # Fuzzy match: Try last name matching and partial matching
-    best_match = None
-    best_score = 0
-    
-    for profile in speaker_profiles:
-        if not profile['name']:
-            continue
-        
-        profile_name_lower = profile['name'].lower().strip()
-        
-        # Extract last names (simple approach: last word)
-        speaker_parts = speaker_name_lower.split()
-        profile_parts = profile_name_lower.split()
-        
-        if speaker_parts and profile_parts:
-            speaker_last = speaker_parts[-1]
-            profile_last = profile_parts[-1]
-            
-            # Last name exact match
-            if speaker_last == profile_last:
-                score = 0.8
-                
-                # Bonus if more words match
-                common_words = set(speaker_parts) & set(profile_parts)
-                score += 0.05 * len(common_words)
-                
-                if score > best_score:
-                    best_score = score
-                    best_match = profile
-        
-        # Partial name containment (one contains the other)
-        if speaker_name_lower in profile_name_lower or profile_name_lower in speaker_name_lower:
-            score = 0.6
-            if score > best_score:
-                best_score = score
-                best_match = profile
-    
-    # Only return match if score is high enough (70%+)
-    if best_score >= 0.7:
-        return best_match
-    
-    return None
-
-def get_representing_from_profile(profile):
-    """
-    Extract the 'representing' field from a speaker profile using smart type-aware logic.
-    
-    Rules:
-    - international_organization or ngo: Return Organization only
-    - government with specific Organization: Return "Organization, Country"
-    - government without Organization or generic org: Return Country only
-    - Handle edge cases (missing fields)
-    """
-    if not profile:
-        return "Not specified"
-    
-    speaker_type = profile.get('type', '') or ''
-    speaker_type = speaker_type.lower()
-    organization = profile.get('organization') or ''
-    organization = organization.strip()
-    country = profile.get('country') or ''
-    country = country.strip()
-    
-    # For international organizations and NGOs: Return organization only
-    if speaker_type in ['international_organization', 'ngo']:
-        if organization:
-            return organization
-        elif country and country.lower() != 'international':
-            return country
-        else:
-            return "Not specified"
-    
-    # For government types: Smart logic
-    if speaker_type == 'government':
-        # Check if organization is generic or specific
-        generic_orgs = [
-            'government', 'ministry', 'department', 'office',
-            'united nations', 'un '
-        ]
-        
-        has_specific_org = False
-        if organization:
-            org_lower = organization.lower()
-            # Check if it's more than just a generic word
-            if not any(org_lower == generic for generic in ['government', 'ministry', 'department']):
-                has_specific_org = True
-        
-        # Government with specific ministry/organization
-        if has_specific_org and country:
-            return f"{organization}, {country}"
-        
-        # Government with country only (or generic org)
-        if country:
-            return country
-        
-        # Only organization available
-        if organization:
-            return organization
-    
-    # For other types or unspecified: Use whatever is available
-    if organization and country:
-        return f"{organization}, {country}"
-    elif organization:
-        return organization
-    elif country:
-        return country
-    
-    return "Not specified"
-
-def extract_speaker_from_moderator_introduction(text):
-    """
-    Extract speaker/country name from moderator's floor-giving statement.
-    
-    Examples:
-    - "I give the floor to Indonesia" → "Indonesia"
-    - "Thank you. I give the floor to the delegation of Iran" → "Iran"
-    - "Jordan has the floor" → "Jordan"
-    - "Next, I give the floor to Japan" → "Japan"
-    
-    Returns: Speaker name or None if not found
-    """
-    if not text or len(text) < 5:
-        return None
-    
-    patterns = [
-        # "give/gave/giving the floor to [Country/Name]"
-        r"(?:give|gave|giving)\s+the\s+floor\s+to\s+(?:the\s+)?(?:delegation\s+of\s+)?([A-Z][a-zA-Z\s\-']+?)(?:\.|,|$|\n|Thank)",
-        
-        # "[Country] has the floor"
-        r"^([A-Z][a-zA-Z\s\-']+?)\s+has\s+the\s+floor",
-        
-        # "floor to [Country]" (shorter variant)
-        r"floor\s+to\s+(?:the\s+)?(?:delegation\s+of\s+)?([A-Z][a-zA-Z\s\-']+?)(?:\.|,|$|\n)",
-        
-        # "Thank you. [Country]" or "I thank you. [Country]"
-        r"(?:I\s+)?[Tt]hank\s+you[.,]?\s+([A-Z][a-zA-Z\s\-']+?)(?:\.|$|\n)",
-    ]
-    
-    for pattern in patterns:
-        match = re.search(pattern, text, re.MULTILINE)
-        if match:
-            speaker = match.group(1).strip()
-            
-            # Clean up common noise words and patterns
-            speaker = re.sub(r'\s+has\s+the\s+floor.*$', '', speaker, flags=re.IGNORECASE)
-            speaker = re.sub(r'\s+Thank\s+you.*$', '', speaker, flags=re.IGNORECASE)
-            speaker = speaker.strip()
-            
-            # Additional cleanup: remove trailing words like "I give", "Next", etc.
-            cleanup_words = ['I give', 'Next', 'Now', 'Thank you', 'Thanks']
-            for word in cleanup_words:
-                if speaker.lower().startswith(word.lower()):
-                    speaker = speaker[len(word):].strip()
-            
-            # Validate: reasonable length, starts with capital, not a common phrase
-            if 3 <= len(speaker) <= 50 and speaker[0].isupper():
-                # Exclude common noise phrases
-                noise_phrases = ['thank you', 'i thank', 'next', 'now', 'the floor', 'has the']
-                if speaker.lower() not in noise_phrases:
-                    return speaker
-    
-    return None
-
-def extract_speakers_from_relabeled_transcript(filled_transcript, existing_speaker_info):
-    """
-    Extract unique speaker names from relabeled transcript and create pseudo-profiles
-    for speakers not already in existing_speaker_info.
-    
-    This is called after relabeling to ensure we have profiles for all speakers,
-    especially countries identified from moderator introductions.
-    
-    Args:
-        filled_transcript: List of transcript segments with relabeled speaker names
-        existing_speaker_info: Existing speaker_info dict from initial extraction
-        
-    Returns:
-        List of new speaker profile dicts to be added to speaker_info
-    """
-    if not filled_transcript:
-        return []
-    
-    # Get existing speaker names (for deduplication)
-    existing_names = set()
-    if existing_speaker_info and existing_speaker_info.get('speakers'):
-        for speaker in existing_speaker_info['speakers']:
-            name = speaker.get('name', '').strip()
-            if name:
-                existing_names.add(name.lower())
-            # Also add alternative names
-            for alt_name in speaker.get('alternative_names', []):
-                if alt_name:
-                    existing_names.add(alt_name.lower().strip())
-    
-    # Extract unique speaker names from transcript
-    speaker_names = set()
-    for segment in filled_transcript:
-        speaker = segment.get('speaker', '').strip()
-        if speaker and not is_generic_speaker_label(speaker):
-            speaker_names.add(speaker)
-    
-    # Create pseudo-profiles for new speakers
-    new_speakers = []
-    for speaker_name in sorted(speaker_names):
-        # Skip if already exists
-        if speaker_name.lower() in existing_names:
-            continue
-        
-        # Determine if this looks like a country/organization or a person
-        # Patterns: "Distinguished Representative of X", "X" (single word/short)
-        is_country_delegation = False
-        country_name = None
-        
-        # Pattern 1: "Distinguished Representative of Country"
-        country_match = re.search(r'(?:Distinguished Representative|Delegation|Representative)\s+of\s+(.+)$', speaker_name, re.IGNORECASE)
-        if country_match:
-            country_name = country_match.group(1).strip()
-            is_country_delegation = True
-        # Pattern 2: Single/short name that looks like a country (capitalized, 3-30 chars)
-        elif 3 <= len(speaker_name) <= 30 and speaker_name[0].isupper() and ' ' not in speaker_name[:20]:
-            # Likely a country name
-            country_name = speaker_name
-            is_country_delegation = True
-        
-        # Create appropriate profile
-        if is_country_delegation and country_name:
-            # Country delegation profile
-            profile = {
-                'name': speaker_name,
-                'title': 'Delegation Representative',
-                'organization': '',
-                'country': country_name,
-                'affiliation_type': 'government',
-                'description': f'{speaker_name} participated in the Universal Periodic Review.',
-                'alternative_names': [speaker_name, country_name, f'delegation of {country_name}'],
-                'confidence_score': 'medium'
-            }
-        else:
-            # Generic profile for other speakers (e.g., named moderators, officials)
-            profile = {
-                'name': speaker_name,
-                'title': '',
-                'organization': '',
-                'country': '',
-                'affiliation_type': '',
-                'description': f'{speaker_name} participated in the meeting.',
-                'alternative_names': [speaker_name],
-                'confidence_score': 'medium'
-            }
-        
-        new_speakers.append(profile)
-    
-    if VERBOSE and new_speakers:
-        print(f"✓ Created {len(new_speakers)} pseudo-profiles from relabeled speakers")
-        for speaker in new_speakers[:5]:  # Show first 5
-            print(f"  + {speaker['name']} ({speaker.get('country', 'N/A')})")
-        if len(new_speakers) > 5:
-            print(f"  ... and {len(new_speakers) - 5} more")
-    
-    return new_speakers
-
-def relabel_generic_speakers_from_context(transcript_data):
-    """
-    Pre-process transcript to replace generic speaker labels with actual names
-    extracted from moderator introductions or speaker self-identification.
-    
-    This runs AFTER diarization but BEFORE speaker extraction to improve
-    extraction accuracy by providing better speaker labels.
-    
-    Args:
-        transcript_data: List of transcript segments with 'speaker' and 'content' fields
-        
-    Returns:
-        Modified transcript_data with improved speaker labels
-    """
-    if not transcript_data:
-        return transcript_data
-    
-    relabeled_count = 0
-    
-    for i in range(len(transcript_data)):
-        current = transcript_data[i]
-        speaker = current.get('speaker', '')
-        content = current.get('content', '')
-        
-        # Only process generic labels
-        if not is_generic_speaker_label(speaker):
-            continue
-        
-        # Strategy 1: Check if previous segment (moderator) introduced this speaker
-        if i > 0:
-            prev_segment = transcript_data[i - 1]
-            prev_speaker = prev_segment.get('speaker', '')
-            prev_content = prev_segment.get('content', '')
-            
-            # If previous was moderator or also generic, check for introduction
-            if is_generic_speaker_label(prev_speaker) or 'moderator' in prev_speaker.lower():
-                extracted_name = extract_speaker_from_moderator_introduction(prev_content)
-                if extracted_name:
-                    if VERBOSE:
-                        print(f"  🔄 Relabeling '{speaker}' → '{extracted_name}' (from moderator intro)")
-                    current['speaker'] = extracted_name
-                    relabeled_count += 1
-                    continue
-        
-        # Strategy 2: Check current segment for self-identification
-        # Pattern: "[Country] welcomes..." or "The delegation of [Country]..."
-        self_id_patterns = [
-            # "[Country] welcomes/thanks/appreciates..."
-            r"^([A-Z][a-zA-Z\s\-']+?)\s+(?:welcomes?|thanks?|appreciates?|recognizes?|commends?)\s+",
-            
-            # "The delegation of [Country] welcomes..."
-            r"^(?:The\s+)?delegation\s+of\s+([A-Z][a-zA-Z\s\-']+?)\s+(?:welcomes?|thanks?|appreciates?)",
-        ]
-        
-        for pattern in self_id_patterns:
-            match = re.search(pattern, content)
-            if match:
-                extracted_name = match.group(1).strip()
-                # Validate
-                if 3 <= len(extracted_name) <= 50 and extracted_name[0].isupper():
-                    # Exclude noise words
-                    noise_words = ['The', 'Thank', 'Next', 'Now']
-                    if extracted_name not in noise_words:
-                        if VERBOSE:
-                            print(f"  🔄 Relabeling '{speaker}' → '{extracted_name}' (self-identified)")
-                        current['speaker'] = extracted_name
-                        relabeled_count += 1
-                        break
-    
-    if VERBOSE or relabeled_count > 0:
-        print(f"✓ Pre-labeled {relabeled_count} generic speakers from context")
-    
-    return transcript_data
-
-def is_generic_speaker_label(speaker_name):
-    """
-    Check if speaker name is a generic label that needs improvement.
-    Returns True for: Participant 1, Speaker A, Unknown, etc.
-    Note: 'moderator' and 'host' are excluded as they are valid role labels.
-    """
-    if not speaker_name:
-        return True
-    
-    speaker_lower = speaker_name.lower().strip()
-    
-    generic_patterns = [
-        'participant',
-        'speaker',
-        'unknown',
-        # 'moderator' removed - valid role label
-        # 'host' removed - valid role label
-        'Participant',
-        'Speaker',
-        'unidentified',
-        'person',
-        'voice'
-    ]
-    
-    # Check for generic patterns
-    for pattern in generic_patterns:
-        if pattern in speaker_lower:
-            return True
-    
-    # Check for very short names (likely placeholders)
-    if len(speaker_name.strip()) < 3:
-        return True
-    
-    return False
-
-def extract_speaker_transition_context(grouped_segments, current_index, lines_per_speaker=4):
-    """
-    Extract context from speaker transitions:
-    - Last N lines from previous speaker
-    - All lines from current speaker (the generic one)
-    - First N lines from next speaker
-    
-    Works with grouped_segments (already grouped by speaker turn)
-    Returns: (context_text, has_prev, has_next)
-    """
-    context_parts = []
-    has_prev = False
-    has_next = False
-    
-    # Previous speaker (last N segments)
-    if current_index > 0:
-        prev_group = grouped_segments[current_index - 1]
-        prev_speaker = prev_group['speaker']
-        prev_text = prev_group['combined_text']
-        
-        # Split into sentences/segments (approximate by splitting on periods/newlines)
-        prev_lines = [s.strip() for s in prev_text.replace('\n', '. ').split('. ') if s.strip()]
-        last_lines = prev_lines[-lines_per_speaker:] if len(prev_lines) > lines_per_speaker else prev_lines
-        
-        if last_lines:
-            context_parts.append(f"[PREVIOUS SPEAKER - {prev_speaker}] (last lines):")
-            context_parts.append(' '.join(last_lines))
-            context_parts.append("")
-            has_prev = True
-    
-    # Current speaker (all content)
-    current_group = grouped_segments[current_index]
-    current_speaker = current_group['speaker']
-    current_text = current_group['combined_text']
-    
-    context_parts.append(f">>> TARGET SPEAKER - {current_speaker} <<<")
-    context_parts.append(current_text)
-    context_parts.append("")
-    
-    # Next speaker (first N segments)
-    if current_index < len(grouped_segments) - 1:
-        next_group = grouped_segments[current_index + 1]
-        next_speaker = next_group['speaker']
-        next_text = next_group['combined_text']
-        
-        # Split into sentences/segments
-        next_lines = [s.strip() for s in next_text.replace('\n', '. ').split('. ') if s.strip()]
-        first_lines = next_lines[:lines_per_speaker] if len(next_lines) > lines_per_speaker else next_lines
-        
-        if first_lines:
-            context_parts.append(f"[NEXT SPEAKER - {next_speaker}] (first lines):")
-            context_parts.append(' '.join(first_lines))
-            has_next = True
-    
-    return '\n'.join(context_parts), has_prev, has_next
-
-def identify_speaker_from_chunk_context(prev_group, current_group, next_group, speaker_profiles):
-    """
-    SIMPLER FALLBACK: Ask GPT-4 directly who is speaking based on full speaker turns.
-    
-    Args:
-        prev_group: Previous grouped segment dict with 'speaker' and 'combined_text' (or None)
-        current_group: Current grouped segment dict with 'combined_text'
-        next_group: Next grouped segment dict with 'speaker' and 'combined_text' (or None)
-        speaker_profiles: List of speaker profile dicts
-        
-    Returns: (name, representing) or (None, None)
-    """
-    # Try Azure OpenAI first (most reliable)
-    client_info = setup_azure_openai_client()
-    if client_info:
-        client, deployment = client_info
-        provider = "Azure GPT-4"
-    else:
-        client_info = setup_openai_client()
-        if client_info:
-            client, deployment = client_info
-            provider = "OpenAI"
-        else:
-            return None, None  # Skip Ollama for this critical task
-    
-    # Build context with speaker names
-    context_parts = []
-    
-    if prev_group:
-        prev_speaker = prev_group.get('speaker', 'Unknown')
-        prev_text = prev_group.get('combined_text', '')
-        context_parts.append(f"=== PREVIOUS SPEAKER: {prev_speaker} ===")
-        context_parts.append(prev_text[-800:])  # Last 800 chars (their conclusion)
-        context_parts.append("")
-    
-    context_parts.append("=== TARGET SPEAKER (IDENTIFY THIS PERSON) ===")
-    current_text = current_group.get('combined_text', '')
-    # Limit to first 1500 chars to stay focused
-    context_parts.append(current_text[:1500])
-    context_parts.append("")
-    
-    if next_group:
-        next_speaker = next_group.get('speaker', 'Unknown')
-        next_text = next_group.get('combined_text', '')
-        context_parts.append(f"=== NEXT SPEAKER: {next_speaker} ===")
-        context_parts.append(next_text[:800])  # First 800 chars (their opening)
-    
-    context = '\n'.join(context_parts)
-    
-    # Build compact speaker list
-    speaker_list = ""
-    if speaker_profiles:
-        speaker_list = "\nKNOWN SPEAKERS:\n"
-        for profile in speaker_profiles[:30]:  # More profiles
-            name = profile.get('name', '')
-            country = profile.get('country') or ''
-            org = profile.get('organization') or ''
-            if name:
-                if country:
-                    speaker_list += f"- {name} ({country})\n"
-                elif org:
-                    speaker_list += f"- {name} ({org})\n"
-                else:
-                    speaker_list += f"- {name}\n"
-    
-    prompt = f"""You are analyzing a meeting transcript. Identify who is speaking in the TARGET SPEAKER section.
-
-{speaker_list}
-
-TRANSCRIPT WITH SPEAKER CONTEXT:
-{context}
-
-TASK: Determine the target speaker's name and what organization/country they represent.
-
-KEY CLUES:
-1. PREVIOUS SPEAKER may have introduced the target: "I give the floor to [Country]", "Next is [Name]"
-2. TARGET SPEAKER may self-identify: "[Country] welcomes...", "I'm [Name]", "The delegation of [Country]..."
-3. NEXT SPEAKER may address them: "Thank you [Country]", "Thank you [Name]"
-4. Look for titles: Minister, Ambassador, Representative of [Country]
-
-IMPORTANT:
-- If PREVIOUS SPEAKER is "Moderator" saying "I give the floor to X", then target is likely X
-- If target starts with "[Country] welcomes/thanks/appreciates", they are from that country
-- Match against KNOWN SPEAKERS when possible
-
-RESPONSE (JSON only):
-{{"name": "Full Name or Country Name", "representing": "Country or Organization"}}
-
-If uncertain, return:
-{{"name": null, "representing": null}}"""
-    
-    try:
-        # Log context preview
-        if VERBOSE:
-            print(f"  → Sending to {provider}:")
-            print(f"     Context length: {len(context)} chars")
-            if prev_group:
-                print(f"     Prev: {prev_group.get('speaker', 'Unknown')}")
-            print(f"     Target: {current_text[:100]}...")
-            if next_group:
-                print(f"     Next: {next_group.get('speaker', 'Unknown')}")
-        
-        token_param = 'max_completion_tokens' if 'OpenAI' in provider else 'max_tokens'
-        api_params = {
-            'model': deployment,
-            'messages': [{"role": "user", "content": prompt}],
-            token_param: 400
-        }
-        
-        if 'OpenAI' not in provider:
-            api_params['temperature'] = 0.1
-        
-        response = client.chat.completions.create(**api_params)
-        result_text = response.choices[0].message.content.strip()
-        
-        if VERBOSE:
-            print(f"  ← Response: {result_text[:150]}...")
-        
-        # Clean JSON
-        if "```json" in result_text:
-            result_text = result_text.split("```json")[1].split("```")[0]
-        elif "```" in result_text:
-            result_text = result_text.split("```")[1].split("```")[0]
-        
-        result_text = result_text.strip()
-        
-        if not result_text.startswith('{'):
-            start = result_text.find('{')
-            if start != -1:
-                result_text = result_text[start:]
-        if not result_text.endswith('}'):
-            end = result_text.rfind('}')
-            if end != -1:
-                result_text = result_text[:end+1]
-        
-        # Parse JSON
-        try:
-            result = json.loads(result_text)
-            name = result.get('name')
-            representing = result.get('representing')
-            
-            # Log the result
-            if name:
-                if VERBOSE:
-                    print(f"  ✓ Identified: name='{name}', representing='{representing}'")
-            else:
-                if VERBOSE:
-                    print(f"  ✗ GPT-4 returned null (couldn't identify with confidence)")
-            
-            return name, representing
-        except json.JSONDecodeError as e:
-            # Regex fallback
-            if VERBOSE:
-                print(f"  ⚠ JSON parse error: {e}, trying regex...")
-            
-            name_match = re.search(r'"name"\s*:\s*"([^"]+)"', result_text)
-            repr_match = re.search(r'"representing"\s*:\s*"([^"]+)"', result_text)
-            
-            name = name_match.group(1) if name_match else None
-            representing = repr_match.group(1) if repr_match else None
-            
-            if name and VERBOSE:
-                print(f"  ✓ Regex extracted: name='{name}', representing='{representing}'")
-            elif VERBOSE:
-                print(f"  ✗ Both JSON and regex failed")
-            
-            return name, representing
-    
-    except Exception as e:
-        print(f"  ✗ Chunk identification error: {e}")
-        return None, None
-
-
-def identify_speaker_from_transition_context(context_text, speaker_profiles, has_prev, has_next):
-    """
-    Use AI to identify speaker from transition context.
-    Returns (name, organization/country) or (None, None)
-    """
-    if VERBOSE:
-        print(f"\n🔍 Analyzing context (has_prev={has_prev}, has_next={has_next}):")
-        print(f"   Context length: {len(context_text)} chars")
-        print(f"   First 200 chars: {context_text[:200]}...")
-    
-    # Try Azure OpenAI first, then OpenAI, then Ollama
-    client_info = setup_azure_openai_client()
-    if client_info:
-        client, deployment = client_info
-        provider = "Azure GPT-4"
-    else:
-        client_info = setup_openai_client()
-        if client_info:
-            client, deployment = client_info
-            provider = "OpenAI"
-        else:
-            client_info = setup_ollama_client()
-            if not client_info:
-                return None, None
-            client, deployment = client_info
-            provider = "Ollama"
-    
-    # Build profiles context (compact)
-    profiles_context = ""
-    if speaker_profiles:
-        profiles_context = "\n\nKNOWN SPEAKERS:\n"
-        for profile in speaker_profiles[:20]:  # More profiles since this is focused
-            name = profile.get('name', '')
-            org = profile.get('organization') or ''
-            country = profile.get('country') or ''
-            if name:
-                info = f"{name}"
-                if org and country:
-                    info += f" ({org}, {country})"
-                elif org:
-                    info += f" ({org})"
-                elif country:
-                    info += f" ({country})"
-                profiles_context += f"- {info}\n"
-    
-    intro_hints = ""
-    if has_prev:
-        intro_hints += "\n- The PREVIOUS speaker may have introduced the target speaker"
-    if has_next:
-        intro_hints += "\n- The NEXT speaker may have addressed or referenced the target speaker"
-    
-    prompt = f"""Identify an unknown speaker from a meeting transcript by analyzing speaker transitions.
-
-{profiles_context}
-
-CONTEXT:
-{context_text}
-
-IDENTIFICATION CLUES:{intro_hints}
-- Self-introduction: "I'm [Name]", "My name is [Name]", "[Name] here"
-- Introduction by previous: "Please welcome [Name]", "Next is [Name] from [Org]"
-- Being addressed: "Thank you, [Name]", "Mr./Ms. [Name]", "Ambassador [Name]"
-- Title/position: "Minister", "Ambassador", "Director", "Representative of [Country]"
-- Organization mention: "from [Organization]", "representing [Country]"
-
-INSTRUCTIONS:
-1. Check if the target speaker matches any KNOWN SPEAKERS (prioritize these)
-2. Look for explicit names or titles in all three sections
-3. Only return a name if you're confident (>70% certainty)
-
-RESPONSE FORMAT (JSON only):
-{{"name": "Full Name or null", "representing": "Organization/Country or null"}}
-
-If uncertain, return: {{"name": null, "representing": null}}"""
-
-    try:
-        token_param = 'max_completion_tokens' if 'OpenAI' in provider else 'max_tokens'
-        api_params = {
-            'model': deployment,
-            'messages': [{"role": "user", "content": prompt}],
-            token_param: 600
-        }
-        
-        if 'OpenAI' not in provider:
-            api_params['temperature'] = 0.1
-        
-        response = client.chat.completions.create(**api_params)
-        result_text = response.choices[0].message.content.strip()
-        
-        # Clean JSON - more aggressive
-        if "```json" in result_text:
-            result_text = result_text.split("```json")[1].split("```")[0]
-        elif "```" in result_text:
-            result_text = result_text.split("```")[1].split("```")[0]
-        
-        result_text = result_text.strip()
-        
-        # Extract JSON object boundaries
-        if not result_text.startswith('{'):
-            start = result_text.find('{')
-            if start != -1:
-                result_text = result_text[start:]
-        if not result_text.endswith('}'):
-            end = result_text.rfind('}')
-            if end != -1:
-                result_text = result_text[:end+1]
-        
-        # Try standard JSON parsing
-        try:
-            result = json.loads(result_text)
-            name = result.get('name')
-            representing = result.get('representing')
-            return name, representing
-        except json.JSONDecodeError as json_err:
-            # JSON parsing failed - try regex extraction
-            if VERBOSE:
-                print(f"  ⚠ JSON parse error: {json_err}, trying regex...")
-            
-            # Extract name field with regex
-            name_match = re.search(r'"name"\s*:\s*"([^"]+)"', result_text)
-            name = name_match.group(1) if name_match else None
-            
-            # Also try to match null explicitly
-            if not name:
-                if re.search(r'"name"\s*:\s*null', result_text, re.IGNORECASE):
-                    return None, None
-            
-            # Extract representing field with regex (can be string or null)
-            repr_match = re.search(r'"representing"\s*:\s*"([^"]+)"', result_text)
-            representing = repr_match.group(1) if repr_match else None
-            
-            # Check for null value
-            if re.search(r'"representing"\s*:\s*null', result_text):
-                representing = None
-            
-            if name:
-                if VERBOSE:
-                    print(f"  ✓ Regex extraction: name='{name}', representing='{representing}'")
-                return name, representing
-            else:
-                return None, None
-        
-    except Exception as e:
-        if VERBOSE:
-            print(f"  ⚠ Context identification error: {e}")
-        return None, None
-
-def create_speakers_table(transcript_data, meeting_id, speakers_list_path=None):
-    """
-    Create a structured table from the transcript data matching the database schema.
-    Now enhanced with speaker profile matching from speakers_list.txt for accurate representation.
-    """
+def create_speakers_table(transcript_data, meeting_id):
+    """Create a structured table from the transcript data matching the database schema - exact logic from organize_speakers_table.py"""
     print(f"Processing {len(transcript_data)} transcript segments...")
-    
-    # Parse speaker profiles if provided
-    speaker_profiles = []
-    if speakers_list_path:
-        speaker_profiles = parse_speakers_list_file(speakers_list_path)
-        if speaker_profiles:
-            print(f"Loaded {len(speaker_profiles)} speaker profiles from speakers_list.txt")
-        else:
-            print("No speaker profiles found in speakers_list.txt, falling back to text parsing")
     
     # Group consecutive segments from same speaker
     grouped_segments = group_consecutive_segments(transcript_data)
@@ -3247,76 +2278,10 @@ def create_speakers_table(transcript_data, meeting_id, speakers_list_path=None):
     
     # Create table data
     table_data = []
-    match_stats = {'matched': 0, 'unmatched': 0, 'fallback': 0, 'context_identified': 0}
     
     for i, group in enumerate(grouped_segments):
         speaker_name = group['speaker']
-        
-        # Try to match with speaker profiles
-        if speaker_profiles:
-            matched_profile = match_speaker_to_profile(speaker_name, speaker_profiles)
-            
-            if matched_profile:
-                # Use profile data for clean speaker name and representing
-                clean_speaker = matched_profile['name']
-                representing = get_representing_from_profile(matched_profile)
-                match_stats['matched'] += 1
-            else:
-                # No match - check if it's a generic label
-                if is_generic_speaker_label(speaker_name):
-                    # Try context-based identification
-                    if VERBOSE:
-                        print(f"\n🎯 Turn {i+1}/{len(grouped_segments)}: Generic label '{speaker_name}' detected")
-                        print(f"   Attempting context-based identification...")
-                    
-                    context_text, has_prev, has_next = extract_speaker_transition_context(
-                        grouped_segments, i, lines_per_speaker=4
-                    )
-                    
-                    identified_name, identified_org = identify_speaker_from_transition_context(
-                        context_text, speaker_profiles, has_prev, has_next
-                    )
-                    
-                    if identified_name:
-                        # Successfully identified from context!
-                        clean_speaker = identified_name
-                        representing = identified_org if identified_org else "Not specified"
-                        match_stats['context_identified'] += 1
-                        print(f"  ✓ Context ID: '{speaker_name}' → '{clean_speaker}'")
-                    else:
-                        # FALLBACK: Try direct chunk-based identification with GPT-4
-                        # Use full grouped speaker turns for better context
-                        print(f"   First attempt failed, trying chunk-based fallback...")
-                        
-                        # Get previous, current, and next grouped segments
-                        prev_group = grouped_segments[i - 1] if i > 0 else None
-                        current_grp = group
-                        next_group = grouped_segments[i + 1] if i < len(grouped_segments) - 1 else None
-                        
-                        chunk_name, chunk_org = identify_speaker_from_chunk_context(
-                            prev_group, current_grp, next_group, speaker_profiles
-                        )
-                        
-                        if chunk_name:
-                            clean_speaker = chunk_name
-                            representing = chunk_org if chunk_org else "Not specified"
-                            match_stats['context_identified'] += 1
-                            print(f"  ✓ Chunk Fallback: '{speaker_name}' → '{clean_speaker}'")
-                        else:
-                            # Still unknown after all attempts
-                            print(f"  ✗ Chunk fallback failed - keeping generic label")
-                            clean_speaker = speaker_name
-                            representing = "Not specified"
-                            match_stats['unmatched'] += 1
-                else:
-                    # Not generic label, use as-is
-                    clean_speaker = speaker_name
-                    representing = "Not specified"
-                    match_stats['unmatched'] += 1
-        else:
-            # Fallback to old parsing method if no profiles available
-            clean_speaker, representing = parse_speaker_info(speaker_name)
-            match_stats['fallback'] += 1
+        clean_speaker, representing = parse_speaker_info(speaker_name)
         
         # Create row matching the database schema
         row = {
@@ -3330,86 +2295,6 @@ def create_speakers_table(transcript_data, meeting_id, speakers_list_path=None):
         }
         
         table_data.append(row)
-    
-    # POST-PROCESSING: Check if remaining "Participant X" labels are continuations
-    print("\n🔍 Post-processing: Checking for speech continuations...")
-    merge_count = 0
-    
-    for i in range(1, len(table_data)):
-        current_row = table_data[i]
-        prev_row = table_data[i - 1]
-        
-        # Check if current speaker is still a generic label
-        if is_generic_speaker_label(current_row['speaker']):
-            prev_speaker = prev_row['speaker']
-            current_text = current_row['content']
-            prev_text = prev_row['content']
-            
-            # Check if this looks like a continuation (no speaker change indicators)
-            is_continuation = False
-            
-            # Get first 200 chars of current text
-            current_start = current_text[:200].lower()
-            
-            # Patterns that indicate a NEW speaker (NOT a continuation)
-            new_speaker_patterns = [
-                'thank you',
-                'i give the floor',
-                'next speaker',
-                'moving on',
-                'my name is',
-                'i am from',
-                'representing',
-                'on behalf of'
-            ]
-            
-            # Check if current text starts with a new speaker indicator
-            has_new_speaker_indicator = any(pattern in current_start[:50] for pattern in new_speaker_patterns)
-            
-            # If no new speaker indicator AND previous speaker is not generic
-            # then this is likely a continuation
-            if not has_new_speaker_indicator and not is_generic_speaker_label(prev_speaker):
-                # Additional check: time gap (if small gap, more likely continuation)
-                time_gap = current_row['start_time'] - prev_row['end_time']
-                
-                # If gap is less than 5 seconds, very likely a continuation
-                if time_gap < 5.0:
-                    is_continuation = True
-                    if VERBOSE:
-                        print(f"  🔗 Turn {i+1}: '{current_row['speaker']}' → Continuation of '{prev_speaker}' (gap: {time_gap:.1f}s)")
-                # If gap is 5-15 seconds, check content similarity
-                elif time_gap < 15.0:
-                    # Check if content flows naturally (no abrupt topic change)
-                    # Simple heuristic: if current doesn't start with capital letter after period, likely continuation
-                    prev_end = prev_text.strip()[-100:].lower()
-                    
-                    # If previous ends mid-sentence or current continues thought
-                    current_first_char = current_text.strip()[0] if current_text.strip() else ''
-                    if not prev_end.endswith('.') or (current_first_char.isalpha() and current_first_char.islower()):
-                        is_continuation = True
-                        if VERBOSE:
-                            print(f"  🔗 Turn {i+1}: '{current_row['speaker']}' → Continuation of '{prev_speaker}' (content flows)")
-            
-            if is_continuation:
-                # Merge with previous speaker
-                current_row['speaker'] = prev_speaker
-                current_row['representing'] = prev_row['representing']
-                merge_count += 1
-                print(f"  ✓ Merged: Turn {i+1} '{table_data[i]['speaker']}'")
-    
-    if merge_count > 0:
-        print(f"✓ Merged {merge_count} continuation segments")
-    else:
-        print(f"✓ No continuations found")
-    
-    # Print matching statistics
-    if speaker_profiles:
-        total = len(grouped_segments)
-        context_id = match_stats.get('context_identified', 0)
-        if context_id > 0:
-            print(f"Speaker matching: {match_stats['matched']} matched, {context_id} context-identified, {match_stats['unmatched']} unmatched (out of {total} speaker turns)")
-        else:
-            print(f"Speaker matching: {match_stats['matched']} matched, {match_stats['unmatched']} unmatched (out of {total} speaker turns)")
     
     return table_data
 
@@ -3603,41 +2488,6 @@ def run_full_pipeline(url: str, title: str, target_dir: str) -> Dict:
         num_speakers = len(speaker_info.get('speakers', [])) if speaker_info else 0
         logger.step_complete(f"{num_speakers} speakers identified")
         
-        # Save speaker profiles to text file
-        speakers_list_path = None  # Initialize for later use
-        if speaker_info and speaker_info.get('speakers'):
-            speakers_list_path = target_dir / 'speakers_list.txt'
-            with open(speakers_list_path, 'w', encoding='utf-8') as f:
-                f.write(f"# Speaker Profiles for: {title}\n")
-                f.write(f"# Total Speakers: {num_speakers}\n\n")
-                f.write("=" * 80 + "\n\n")
-                
-                for idx, speaker in enumerate(speaker_info.get('speakers', []), 1):
-                    f.write(f"SPEAKER #{idx}\n")
-                    f.write("-" * 40 + "\n")
-                    f.write(f"Name: {speaker.get('name', 'Unknown')}\n")
-                    if speaker.get('title'):
-                        f.write(f"Title: {speaker.get('title')}\n")
-                    if speaker.get('organization'):
-                        f.write(f"Organization: {speaker.get('organization')}\n")
-                    if speaker.get('country'):
-                        f.write(f"Country: {speaker.get('country')}\n")
-                    if speaker.get('affiliation_type'):
-                        f.write(f"Type: {speaker.get('affiliation_type')}\n")
-                    if speaker.get('description'):
-                        f.write(f"Description: {speaker.get('description')}\n")
-                    if speaker.get('alternative_names'):
-                        alt_names = ', '.join(speaker.get('alternative_names', []))
-                        if alt_names:
-                            f.write(f"Also known as: {alt_names}\n")
-                    if speaker.get('confidence_score'):
-                        f.write(f"Confidence: {speaker.get('confidence_score')}\n")
-                    f.write("\n")
-                
-                f.write("=" * 80 + "\n")
-            
-            logger.debug(f"Saved speaker profiles to {speakers_list_path.name}")
-        
         # Step 5: Fill speaker information
         logger.step("Organizing segments")
         global_speaker_context = create_global_speaker_context(speaker_info, compact=False)  # Keep full format for Gemini fallback
@@ -3655,61 +2505,8 @@ def run_full_pipeline(url: str, title: str, target_dir: str) -> Dict:
         with open(filled_json_path, 'w', encoding='utf-8') as f:
             json.dump(filled_transcript, f, indent=2, ensure_ascii=False)
         
-        # ✨ NEW: Pre-label generic speakers from context BEFORE creating structured segments
-        # This improves speaker matching by replacing generic labels like "Participant 1"
-        # with actual names extracted from moderator introductions
-        if filled_transcript:
-            filled_transcript = relabel_generic_speakers_from_context(filled_transcript)
-            # Re-save the improved transcript
-            with open(filled_json_path, 'w', encoding='utf-8') as f:
-                json.dump(filled_transcript, f, indent=2, ensure_ascii=False)
-            
-            # ✨ Extract new speakers found via relabeling and create pseudo-profiles
-            # This ensures we have profiles for countries identified from context
-            new_speakers_found = extract_speakers_from_relabeled_transcript(filled_transcript, speaker_info)
-            if new_speakers_found:
-                # Merge new speakers into speaker_info
-                if speaker_info is None:
-                    speaker_info = {'speakers': []}
-                speaker_info['speakers'].extend(new_speakers_found)
-                num_speakers = len(speaker_info.get('speakers', []))
-                
-                # Re-save speaker profiles with new entries
-                if speakers_list_path:
-                    with open(speakers_list_path, 'w', encoding='utf-8') as f:
-                        f.write(f"# Speaker Profiles for: {title}\n")
-                        f.write(f"# Total Speakers: {num_speakers}\n\n")
-                        f.write("=" * 80 + "\n\n")
-                        
-                        for idx, speaker in enumerate(speaker_info.get('speakers', []), 1):
-                            f.write(f"SPEAKER #{idx}\n")
-                            f.write("-" * 40 + "\n")
-                            f.write(f"Name: {speaker.get('name', 'Unknown')}\n")
-                            if speaker.get('title'):
-                                f.write(f"Title: {speaker.get('title')}\n")
-                            if speaker.get('organization'):
-                                f.write(f"Organization: {speaker.get('organization')}\n")
-                            if speaker.get('country'):
-                                f.write(f"Country: {speaker.get('country')}\n")
-                            if speaker.get('affiliation_type'):
-                                f.write(f"Type: {speaker.get('affiliation_type')}\n")
-                            if speaker.get('description'):
-                                f.write(f"Description: {speaker.get('description')}\n")
-                            if speaker.get('alternative_names'):
-                                alt_names = ', '.join(speaker.get('alternative_names', []))
-                                if alt_names:
-                                    f.write(f"Also known as: {alt_names}\n")
-                            if speaker.get('confidence_score'):
-                                f.write(f"Confidence: {speaker.get('confidence_score')}\n")
-                            f.write("\n")
-                        
-                        f.write("=" * 80 + "\n")
-                    
-                    if VERBOSE:
-                        print(f"✓ Updated speaker profiles: {num_speakers} total speakers ({len(new_speakers_found)} from relabeling)")
-        
         # Step 6-7: Create structured segments
-        structured_segments = create_speakers_table(filled_transcript, 1, speakers_list_path)
+        structured_segments = create_speakers_table(filled_transcript, 1)
         logger.step_complete(f"{len(structured_segments)} speaker turns")
         
         # Create speaker transcript file

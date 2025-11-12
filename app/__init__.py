@@ -43,14 +43,22 @@ def create_app():
     app.config['UPLOAD_FOLDER'] = uploads_path
     app.config['MAX_CONTENT_LENGTH'] = int(os.environ.get('MAX_CONTENT_LENGTH', 500 * 1024 * 1024))  # 500MB
     
-    # AI Services configuration
-    app.config['GEMINI_API_KEY'] = os.environ.get('GEMINI_API_KEY')
+    # AI Services configuration (Priority: Azure → OpenAI → Ollama → Gemini)
     
-    # Azure OpenAI configuration for enhanced speaker identification (GPT-4)
+    # PRIMARY: Azure OpenAI (GPT-4) - Production ready
     app.config['AZURE_OPENAI_API_KEY'] = os.environ.get('AZURE_OPENAI_API_KEY')
     app.config['AZURE_OPENAI_ENDPOINT'] = os.environ.get('AZURE_OPENAI_ENDPOINT', 'https://z-openai-openai4tsb-dev-chn.openai.azure.com/')
     app.config['AZURE_OPENAI_API_VERSION'] = os.environ.get('AZURE_OPENAI_API_VERSION', '2024-12-01-preview')
     app.config['AZURE_OPENAI_DEPLOYMENT_NAME'] = os.environ.get('AZURE_OPENAI_DEPLOYMENT_NAME', 'GPT-4')
+    
+    # SECONDARY: OpenAI API (GPT-5/GPT-4 Turbo) - Optional fallback
+    app.config['OPENAI_API_KEY'] = os.environ.get('OPENAI_API_KEY')
+    app.config['OPENAI_MODEL_NAME'] = os.environ.get('OPENAI_MODEL_NAME', 'gpt-4-turbo')
+    app.config['OPENAI_ORG_ID'] = os.environ.get('OPENAI_ORG_ID')
+    app.config['OPENAI_BASE_URL'] = os.environ.get('OPENAI_BASE_URL', 'https://api.openai.com/v1')
+    
+    # TERTIARY: Google Gemini API
+    app.config['GEMINI_API_KEY'] = os.environ.get('GEMINI_API_KEY')
     
     # Ollama configuration for local LLM inference (Gemma 3)
     app.config['OLLAMA_BASE_URL'] = os.environ.get('OLLAMA_BASE_URL', 'http://localhost:11434/v1')
@@ -62,6 +70,10 @@ def create_app():
     
     # Flask debug mode
     app.config['DEBUG'] = os.environ.get('FLASK_DEBUG', 'True').lower() == 'true'
+    
+    # Suppress werkzeug HTTP request logs (INFO level)
+    log = logging.getLogger('werkzeug')
+    log.setLevel(logging.WARNING)
     
     # Create directories
     os.makedirs(uploads_path, exist_ok=True)
