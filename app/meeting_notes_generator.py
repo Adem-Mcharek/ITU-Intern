@@ -18,6 +18,14 @@ except ImportError:
     print("Warning: google-generativeai not available. Meeting notes generation will be disabled.")
 
 try:
+    from openai import AzureOpenAI
+    AZURE_OPENAI_AVAILABLE = True
+except ImportError:
+    AZURE_OPENAI_AVAILABLE = False
+    AzureOpenAI = None
+    print("Warning: openai not available. Meeting notes generation will be disabled.")
+
+try:
     from docx import Document
     from docx.shared import Inches, Pt, RGBColor
     from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
@@ -28,55 +36,41 @@ except ImportError:
     DOCX_AVAILABLE = False
     print("Warning: python-docx not available. Meeting notes generation will be disabled.")
 
-# Concise meeting notes prompt for ITU style (similar to attached examples)
+# Concise meeting notes prompt for ITU style - compact format
 MEETING_NOTES_PROMPT = """
 You are an ITU intern creating concise, professional meeting notes similar to UN/ITU diplomatic style.
 
-Create structured meeting notes that are:
-- CONCISE and focused (2-3 pages max when printed)
-- FORMAL diplomatic language 
-- CLEAR section structure
-- FACTUAL and objective
+CRITICAL: Keep each section SHORT and CONCISE.
 
-Use this EXACT structure:
+Use this structure (make each section 1-2 short paragraphs or bullets ONLY):
 
 **MEETING OVERVIEW**
-Brief purpose, key participants, main themes (2-3 sentences only)
+1-2 sentences max: Purpose and key participants
 
 **KEY DISCUSSIONS**
-Main topics with speaker attribution. Format: "[Speaker Name, Organization] emphasized that..."
-Focus on: decisions, commitments, technical points, policy matters
+2-3 bullet points max. One sentence each.
 
 **POSITIONS & RECOMMENDATIONS**  
-Member state positions and organizational viewpoints
-Areas of consensus/disagreement (be concise)
+2-3 bullet points max. Focus on consensus/disagreement only.
 
 **DECISIONS & ACTION ITEMS**
-• Specific decisions made
-• Action items with responsible parties  
-• Timelines and next steps
+• 2-3 decisions maximum
+• 2-3 action items with responsible parties
+• Timelines if any
 
 **TECHNICAL MATTERS** (only if significant technical content)
-Standards, specifications, implementation issues
+1-2 bullets maximum
 
 **CAPACITY BUILDING** (only if discussed)
-Training needs, technical assistance, support for developing countries
+1-2 bullets maximum
 
 STYLE REQUIREMENTS:
 - Use formal UN/ITU language but keep concise
 - Third person: "[Representative] stated..." not "I stated..."
 - Speaker attribution: "[Name, Organization] noted that..."
-- Each section should be 2-4 paragraphs maximum
-- Use bullet points for lists and action items
+- Use ONLY bullet points in each section - NO long paragraphs
 - Focus on substance, not process details
 - Highlight key decisions and commitments
-
-EXAMPLE FORMAT:
-**MEETING OVERVIEW**
-The session addressed digital transformation in least developed countries, with representatives from ITU, UN DESA, World Bank, and several member states participating.
-
-**KEY DISCUSSIONS**
-[Technical Expert, ITU] outlined the challenges of 5G deployment in developing regions, emphasizing spectrum allocation issues. [Policy Advisor, UN DESA] highlighted the persistent digital divide and the need for coordinated international support.
 
 Generate concise meeting notes from this transcript:
 
@@ -100,6 +94,38 @@ def setup_gemini_api() -> Optional[Any]:
         genai.configure(api_key=api_key)
         return genai.GenerativeModel("gemini-2.5-flash-lite-preview-06-17")
     return None
+
+
+def setup_azure_openai_client():
+    """Initialize Azure OpenAI client if configured"""
+    if not AZURE_OPENAI_AVAILABLE:
+        return None
+    
+    # Try to get config from Flask app or environment
+    try:
+        api_key = current_app.config.get('AZURE_OPENAI_API_KEY')
+        endpoint = current_app.config.get('AZURE_OPENAI_ENDPOINT')
+        api_version = current_app.config.get('AZURE_OPENAI_API_VERSION', '2024-12-01-preview')
+        deployment = current_app.config.get('AZURE_OPENAI_DEPLOYMENT_NAME', 'GPT-4')
+    except RuntimeError:
+        api_key = os.environ.get('AZURE_OPENAI_API_KEY')
+        endpoint = os.environ.get('AZURE_OPENAI_ENDPOINT')
+        api_version = os.environ.get('AZURE_OPENAI_API_VERSION', '2024-12-01-preview')
+        deployment = os.environ.get('AZURE_OPENAI_DEPLOYMENT_NAME', 'GPT-4')
+    
+    if not api_key or not endpoint:
+        return None
+    
+    try:
+        client = AzureOpenAI(
+            api_key=api_key,
+            api_version=api_version,
+            azure_endpoint=endpoint
+        )
+        return client, deployment
+    except Exception as e:
+        print(f"Error initializing Azure OpenAI client: {e}")
+        return None
 
 def extract_meeting_metadata(speakers_file_path: Path, meeting_title: str) -> Dict[str, Any]:
     """Extract metadata from meeting content for document header"""
@@ -143,51 +169,191 @@ def extract_meeting_metadata(speakers_file_path: Path, meeting_title: str) -> Di
             'content_length': 0
         }
 
-def generate_meeting_notes_content(transcript_content: str) -> Optional[str]:
-    """Generate professional meeting notes using Gemini API"""
+
+def extract_reference_format(meeting_dir: Path) -> Optional[str]:
+    """Extract reference format from meeting notes reference document if it exists"""
+    if not meeting_dir:
+        return None
+    
+    # Check for reference documents (DOCX first, then PDF)
+    reference_docx = meeting_dir / "meeting_notes_reference.docx"
+    reference_pdf = meeting_dir / "meeting_notes_reference.pdf"
+    
+    if reference_docx.exists():
+        return _extract_text_from_docx(reference_docx)
+    elif reference_pdf.exists():
+        return _extract_text_from_pdf(reference_pdf)
+    
+    return None
+
+
+def _extract_text_from_docx(file_path: Path) -> Optional[str]:
+    """Extract text from DOCX file"""
+    try:
+        from docx import Document
+        doc = Document(str(file_path))
+        text = "\n".join([para.text for para in doc.paragraphs if para.text.strip()])
+        return text if text.strip() else None
+    except Exception as e:
+        print(f"  Warning: Could not read reference DOCX: {e}")
+        return None
+
+
+def _extract_text_from_pdf(file_path: Path) -> Optional[str]:
+    """Extract text from PDF file"""
+    try:
+        try:
+            import PyPDF2
+            with open(file_path, 'rb') as f:
+                reader = PyPDF2.PdfReader(f)
+                text = ""
+                for page in reader.pages:
+                    text += page.extract_text() + "\n"
+            return text if text.strip() else None
+        except ImportError:
+            # Try alternative PDF library
+            try:
+                import pdfplumber
+                with pdfplumber.open(file_path) as pdf:
+                    text = ""
+                    for page in pdf.pages:
+                        text += page.extract_text() + "\n"
+                return text if text.strip() else None
+            except ImportError:
+                print(f"  Warning: PDF libraries not available (install PyPDF2 or pdfplumber)")
+                return None
+    except Exception as e:
+        print(f"  Warning: Could not read reference PDF: {e}")
+        return None
+
+
+def generate_meeting_notes_content(transcript_content: str, meeting_dir: Path = None) -> Optional[str]:
+    """Generate professional meeting notes - tries Azure GPT-4 first, falls back to Gemini
+    
+    Args:
+        transcript_content: The meeting transcript text
+        meeting_dir: Optional meeting directory to check for reference format
+    """
     if not transcript_content.strip():
         return None
     
-    model = setup_gemini_api()
-    if not model:
-        print("Warning: Gemini API not available. Cannot generate meeting notes.")
+    # Check for reference format if meeting_dir provided
+    reference_format = None
+    if meeting_dir:
+        reference_format = extract_reference_format(meeting_dir)
+        if reference_format:
+            print("  ✓ Reference format found, using as template")
+    
+    # Prepare the full prompt
+    if reference_format:
+        # Use reference-based prompt
+        full_prompt = f"""You are an ITU intern creating meeting notes.
+
+CRITICAL: Follow this exact format from the reference example:
+
+{reference_format}
+
+Now generate meeting notes in exactly this format for the following transcript:
+
+{transcript_content}
+
+Generate meeting notes following the reference format strictly:"""
+    else:
+        # Use default prompt
+        full_prompt = MEETING_NOTES_PROMPT + "\n\n" + transcript_content + "\n\nGenerate comprehensive meeting notes:"
+    
+    # Try Azure GPT-4 first (quick, minimal retries)
+    print("Attempting Azure GPT-4...")
+    result = _try_azure_openai(full_prompt)
+    if result:
+        return result
+    
+    # Fall back to Gemini if Azure fails
+    print("Azure failed, trying Gemini fallback...")
+    result = _try_gemini(full_prompt)
+    if result:
+        return result
+    
+    # Both failed
+    print("Error: Both Azure GPT-4 and Gemini failed to generate meeting notes")
+    return None
+
+
+def _try_azure_openai(full_prompt: str) -> Optional[str]:
+    """Try Azure OpenAI with quick retries (no long waits)"""
+    client_info = setup_azure_openai_client()
+    if not client_info:
+        print("  Azure OpenAI not available, skipping...")
+        return None
+    
+    client, deployment = client_info
+    max_retries = 2  # Quick retries only
+    
+    for attempt in range(max_retries):
+        try:
+            print(f"  Azure attempt {attempt + 1}/{max_retries}...")
+            
+            response = client.chat.completions.create(
+                model=deployment,
+                messages=[
+                    {"role": "system", "content": "You are an ITU intern creating professional meeting notes in UN/ITU diplomatic style."},
+                    {"role": "user", "content": full_prompt}
+                ],
+                temperature=0.5,
+                max_tokens=2000
+            )
+            
+            notes_content = response.choices[0].message.content.strip()
+            
+            if len(notes_content) < 100:
+                print(f"  Notes too short, retrying...")
+                continue
+            
+            print(f"  ✓ Azure generated {len(notes_content)} characters")
+            return notes_content
+            
+        except Exception as e:
+            error_str = str(e)
+            is_rate_limit = "429" in error_str or "RateLimitReached" in error_str
+            
+            if is_rate_limit:
+                print(f"  ✗ Azure rate limited, will try Gemini")
+                return None  # Exit to fallback
+            else:
+                print(f"  ✗ Azure error: {type(e).__name__}")
+                if attempt < max_retries - 1:
+                    import time
+                    time.sleep(2)  # Quick 2 second wait
+    
+    return None
+
+
+def _try_gemini(full_prompt: str) -> Optional[str]:
+    """Fall back to Gemini API if Azure fails"""
+    if not GEMINI_AVAILABLE:
+        print("  Gemini not available")
         return None
     
     try:
-        # Prepare the full prompt
-        full_prompt = MEETING_NOTES_PROMPT + "\n\n" + transcript_content + "\n\nGenerate comprehensive meeting notes:"
+        model = setup_gemini_api()
+        if not model:
+            print("  Gemini API not configured")
+            return None
         
-        # Generate notes with retry logic
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                print(f"Generating meeting notes (attempt {attempt + 1}/{max_retries})...")
-                response = model.generate_content(full_prompt)
-                
-                # Clean up response
-                notes_content = response.text.strip()
-                
-                # Validate response quality  
-                if len(notes_content) < 100:
-                    print(f"Notes too short ({len(notes_content)} chars), retrying...")
-                    continue
-                
-                print(f"Successfully generated meeting notes ({len(notes_content)} characters)")
-                return notes_content
-                
-            except Exception as e:
-                print(f"Attempt {attempt + 1} failed: {e}")
-                if attempt == max_retries - 1:
-                    return None
-                
-                # Wait before retry
-                import time
-                time.sleep(2 ** attempt)
+        print("  Trying Gemini API...")
+        response = model.generate_content(full_prompt)
         
-        return None
+        notes_content = response.text.strip()
+        
+        if len(notes_content) < 100:
+            print(f"  Gemini: Notes too short ({len(notes_content)} chars)")
+            return None
+        
+        print(f"  ✓ Gemini generated {len(notes_content)} characters")
+        return notes_content
         
     except Exception as e:
-        print(f"Error generating meeting notes: {e}")
+        print(f"  ✗ Gemini error: {type(e).__name__}: {e}")
         return None
 
 def create_formatted_document(notes_content: str, metadata: Dict[str, Any]) -> Optional[Document]:
@@ -285,7 +451,7 @@ def _add_formatted_content(doc: Document, content: str):
             para = doc.add_paragraph()
             speaker_run = para.add_run(line)
             speaker_run.bold = True
-            speaker_run.font.color.rgb = RGBColor(0, 32, 96)  # ITU blue
+            speaker_run.font.color.rgb = RGBColor(0, 0, 0)  # Black
             para.space_before = Pt(6)
             para.space_after = Pt(3)
             
@@ -360,8 +526,9 @@ def create_meeting_notes(meeting_id: int, speakers_file_path: Path, meeting_titl
     print(f"Extracted {len(transcript_content)} characters of transcript content")
     
     # Generate meeting notes content
-    print("Step 3: Generating professional meeting notes with Gemini...")
-    notes_content = generate_meeting_notes_content(transcript_content)
+    print("Step 3: Generating professional meeting notes with Azure GPT-4...")
+    meeting_dir = speakers_file_path.parent
+    notes_content = generate_meeting_notes_content(transcript_content, meeting_dir)
     
     if not notes_content:
         print("Error: Failed to generate meeting notes content")

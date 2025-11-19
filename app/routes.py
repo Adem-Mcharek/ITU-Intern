@@ -309,6 +309,11 @@ def about():
     """About page"""
     return render_template('about.html')
 
+@bp.route('/presentation')
+def presentation():
+    """Presentation page - showcasing the system for management/stakeholders"""
+    return render_template('presentation.html')
+
 # Admin routes
 @bp.route('/admin')
 @login_required

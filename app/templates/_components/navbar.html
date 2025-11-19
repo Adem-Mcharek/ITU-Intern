@@ -46,6 +46,16 @@
                             <span>About</span>
                         </a>
                     </li>
+                    <li class="nav-item">
+                        <a class="nav-link d-flex align-items-center{{ ' active' if request.endpoint == 'main.presentation' }}" 
+                           href="{{ url_for('main.presentation') }}">
+                            <svg width="14" height="14" fill="currentColor" class="me-1" viewBox="0 0 16 16">
+                                <path d="M0 2a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2V2zm2-1a1 1 0 0 0-1 1v.5h14V2a1 1 0 0 0-1-1H2zm13 3H1v7a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V4z"/>
+                                <path d="M6.5 7.5a.5.5 0 1 1-1 0 .5.5 0 0 1 1 0zm3 0a.5.5 0 1 1-1 0 .5.5 0 0 1 1 0z"/>
+                            </svg>
+                            <span>Presentation</span>
+                        </a>
+                    </li>
                     {% if current_user.has_developer_access %}
                         <!-- Developer Access: Shows both Developer and Admin functionality -->
                         <li class="nav-item dropdown">

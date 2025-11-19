@@ -16,6 +16,14 @@ except ImportError:
     GEMINI_AVAILABLE = False
     print("Warning: google-generativeai not available. Meeting summaries will be disabled.")
 
+try:
+    from openai import AzureOpenAI
+    AZURE_OPENAI_AVAILABLE = True
+except ImportError:
+    AZURE_OPENAI_AVAILABLE = False
+    AzureOpenAI = None
+    print("Warning: openai not available. Meeting summaries will be disabled.")
+
 # ITU-focused summary prompt
 ITU_SUMMARY_PROMPT = """
 You are an ITU staff member writing a brief internal summary for colleagues. Analyze this meeting transcript and write a concise summary focusing ONLY on what matters to ITU's work.
@@ -76,6 +84,38 @@ def setup_gemini_api() -> Optional[Any]:
         return genai.GenerativeModel("gemini-2.5-flash-lite-preview-06-17")
     return None
 
+
+def setup_azure_openai_client():
+    """Initialize Azure OpenAI client if configured"""
+    if not AZURE_OPENAI_AVAILABLE:
+        return None
+    
+    # Try to get config from Flask app or environment
+    try:
+        api_key = current_app.config.get('AZURE_OPENAI_API_KEY')
+        endpoint = current_app.config.get('AZURE_OPENAI_ENDPOINT')
+        api_version = current_app.config.get('AZURE_OPENAI_API_VERSION', '2024-12-01-preview')
+        deployment = current_app.config.get('AZURE_OPENAI_DEPLOYMENT_NAME', 'GPT-4')
+    except RuntimeError:
+        api_key = os.environ.get('AZURE_OPENAI_API_KEY')
+        endpoint = os.environ.get('AZURE_OPENAI_ENDPOINT')
+        api_version = os.environ.get('AZURE_OPENAI_API_VERSION', '2024-12-01-preview')
+        deployment = os.environ.get('AZURE_OPENAI_DEPLOYMENT_NAME', 'GPT-4')
+    
+    if not api_key or not endpoint:
+        return None
+    
+    try:
+        client = AzureOpenAI(
+            api_key=api_key,
+            api_version=api_version,
+            azure_endpoint=endpoint
+        )
+        return client, deployment
+    except Exception as e:
+        print(f"Error initializing Azure OpenAI client: {e}")
+        return None
+
 def extract_transcript_content(speakers_file_path: Path) -> str:
     """Extract clean text content from transcript_speakers.txt file"""
     try:
@@ -101,28 +141,39 @@ def extract_transcript_content(speakers_file_path: Path) -> str:
         return ""
 
 def generate_itu_summary(transcript_content: str) -> Optional[str]:
-    """Generate ITU-focused summary using Gemini API"""
+    """Generate ITU-focused summary using Azure GPT-4"""
     if not transcript_content.strip():
         return None
     
-    model = setup_gemini_api()
-    if not model:
-        print("Warning: Gemini API not available. Cannot generate summary.")
+    client_info = setup_azure_openai_client()
+    if not client_info:
+        print("Warning: Azure OpenAI not available. Cannot generate summary.")
         return None
     
+    client, deployment = client_info
+    
     try:
-        # Prepare the full prompt
-        full_prompt = ITU_SUMMARY_PROMPT + "\n\n" + transcript_content + "\n\nProvide your ITU-focused summary:"
+        # Prepare the prompt (limit context to avoid token limits)
+        full_prompt = ITU_SUMMARY_PROMPT + "\n\n" + transcript_content[:20000] + "\n\nProvide your ITU-focused summary:"
         
         # Generate summary with retry logic
         max_retries = 3
         for attempt in range(max_retries):
             try:
-                print(f"Generating ITU summary (attempt {attempt + 1}/{max_retries})...")
-                response = model.generate_content(full_prompt)
+                print(f"Generating ITU summary with Azure GPT-4 (attempt {attempt + 1}/{max_retries})...")
                 
-                # Clean up response
-                summary = response.text.strip()
+                response = client.chat.completions.create(
+                    model=deployment,
+                    messages=[
+                        {"role": "system", "content": "You are an ITU staff member creating concise internal summaries focusing on ITU-relevant content."},
+                        {"role": "user", "content": full_prompt}
+                    ],
+                    temperature=0.7,
+                    max_tokens=500  # Keep summary concise
+                )
+                
+                # Extract response
+                summary = response.choices[0].message.content.strip()
                 
                 # Validate response quality
                 if len(summary) < 30:
@@ -148,7 +199,7 @@ def generate_itu_summary(transcript_content: str) -> Optional[str]:
         return None
         
     except Exception as e:
-        print(f"Error generating ITU summary: {e}")
+        print(f"Error generating ITU summary with Azure GPT-4: {e}")
         return None
 
 def create_meeting_summary(meeting_id: int, speakers_file_path: Path) -> Optional[str]:
